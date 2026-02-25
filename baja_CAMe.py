@@ -30,6 +30,10 @@ CONFIGURACION_REDES = [
     {
         "red": "Cuernavaca",
         "estaciones": ["Cuernavaca 01"]
+    },
+    {
+        "red": "San Juan del Rio",
+        "estaciones": ["San Juan del Río"]
     }
 ]
 
@@ -37,7 +41,7 @@ CONFIGURACION_REDES = [
 PARAMETROS = ["PM10", "PM2.5", "O3"]
 
 # Ventana temporal de descarga
-FECHA_INICIO   = datetime(2025, 4, 1)  # Inicio fijo del periodo
+FECHA_INICIO   = datetime(2025,11, 1)  # Inicio fijo del periodo
 FECHA_FIN      = datetime.now()         # Fin dinámico: fecha y hora actuales
 
 # Formato de archivos de salida: "csv" o "json"
