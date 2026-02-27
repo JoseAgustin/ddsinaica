@@ -34,6 +34,13 @@ CONFIGURACION_REDES = [
     {
         "red": "San Juan del Rio",
         "estaciones": ["San Juan del Río"]
+    },
+    {
+        "red": "Valle de México",
+        "estaciones": ["Ajusco Medio","Atizapán","Camarones","Centro de Ciencias de la Atmósfera",
+        "Montecillo","Cuajimalpa","Cuautitlán","FES Acatlán","Hospital General de México",
+        "Los Laureles","La Presa","Merced","Miguel Hidalgo","Nezahualcóyotl","Pedregal","Santiago Acahualtepec",
+        "San Agustín","Tlahuac","Tlalnepantla","Tultitlán","UAM Xochimilco","UAM Iztapalapa","Villa de las Flores"]
     }
 ]
 
