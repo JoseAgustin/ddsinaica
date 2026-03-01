@@ -48,7 +48,7 @@ CONFIGURACION_REDES = [
 PARAMETROS = ["PM10", "PM2.5", "O3"]
 
 # Ventana temporal de descarga
-FECHA_INICIO   = datetime(2025,11, 1)  # Inicio fijo del periodo
+FECHA_INICIO   = datetime(2026,1,27)  # Inicio fijo del periodo
 FECHA_FIN      = datetime.now()         # Fin dinámico: fecha y hora actuales
 
 # Formato de archivos de salida: "csv" o "json"
@@ -90,6 +90,7 @@ def download_data_r(network_name, station_name, parameter, start_date, end_date)
     # al momento del desarrollo. VERIFICAR que station_id = 501 sea el ID
     # real en el portal SINAICA antes de ejecutar en producción.
     if (!("Primaria Ignacio Zaragoza" %in% stations_sinaica$station_name)) {{
+        print("Adicionando estacion de monitoreo")
         nueva_estacion <- data.frame(
             station_id        = 501,
             station_name      = "Primaria Ignacio Zaragoza",
@@ -120,6 +121,8 @@ def download_data_r(network_name, station_name, parameter, start_date, end_date)
         )
         stations_sinaica <- rbind(stations_sinaica, nueva_estacion)
     }}
+    # Sobrescribir el data frame excluyendo el ID 436 estacion duplicada
+    stations_sinaica <- stations_sinaica[which(stations_sinaica$station_id != 436), ]
 
     # Filtrar estación por nombre y red (ambos deben coincidir exactamente)
     station <- stations_sinaica[
