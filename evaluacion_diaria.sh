@@ -1,88 +1,84 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
-# evaluacion_diaria.sh
+# evaluacion_diaria.sh  v2.0.0
 # =============================================================================
 #
 # DESCRIPCIÓN
 # -----------
-# Script de evaluación diaria automática del pronóstico de calidad del aire
-# generado por WRF-Chem. Diseñado para ejecutarse mediante crontab cada día
-# por la mañana (se recomienda entre las 06:00 y 08:00 hora local), una vez
-# que los archivos wrfout del día anterior ya estén disponibles en el servidor.
+# Orquestador del pipeline diario de evaluación del pronóstico de calidad del
+# aire generado por WRF-Chem.  Compara las salidas del modelo contra
+# observaciones horarias de la red SINAICA/INECC para siete ciudades del
+# centro de México.
 #
-# El script evalúa tres días de pronóstico:
-#   - Pronóstico iniciado hace 2 días → cubre ayer (Día 2 del run)
-#   - Pronóstico iniciado hace 3 días → cubre ayer (Día 3 del run)
-#   - Pronóstico iniciado hace 1 días → cubre hoy  (Día 1 del run)
+# A partir de la v2.0.0 la descarga de observaciones se realiza íntegramente
+# mediante sinaica_descarga.sh (HTTP directo), eliminando la dependencia de
+# baja_CAMe.py / R / rsinaica.
 #
-# En términos de verificación:
-#   FECHA_EVAL = ayer
-#   Se comparan tres horizontes de pronóstico que corresponden al día de ayer:
-#     mod_dia1 → run iniciado en FECHA_EVAL     (pronóstico a 24h)
-#     mod_dia2 → run iniciado en FECHA_EVAL-1d  (pronóstico a 48h)
-#     mod_dia3 → run iniciado en FECHA_EVAL-2d  (pronóstico a 72h)
+# FLUJO DE EJECUCIÓN
+# ------------------
+#   1. Validar argumentos y dependencias del sistema
+#   2. Verificar disponibilidad de archivos wrfout en LUSTRE
+#   3. Descargar observaciones horarias vía sinaica_descarga.sh
+#   4. Validar archivos descargados (tamaño, registros mínimos)
+#   5. Normalizar CSV al formato de calidad_aire_pipeline.sh
+#   6. Procesar observaciones (separación + consolidación por ciudad)
+#   7. Extraer O3 / PM10 / PM2.5 de cada wrfout (extract_dia.py)
+#   8. Combinar observaciones + modelo por fecha (combinar_dia.py)
+#   9. Calcular métricas estadísticas ventana 30 días (stats_dia.py)
+#  10. Generar página HTML del día (generar_html.py)
+#  11. Actualizar índice histórico web/index.html
+#  12. Limpieza de temporales y registro final en log
 #
-# FLUJO INTERNO
-# -------------
-#   1. Verificar disponibilidad de los 3 archivos wrfout necesarios
-#   2. Descargar observaciones del día de ayer de SINAICA (baja_CAMe.py)
-#   3. Procesar observaciones (calidad_aire_pipeline.sh)
-#   4. Extraer variables del modelo para los 3 archivos wrfout (extract_dia.py)
-#   5. Combinar observaciones + modelo para la fecha de evaluación
-#   6. Calcular métricas estadísticas (stats_dia.py)
-#   7. Generar página HTML de resultados
-#   8. Actualizar índice histórico del sitio web
+# HORIZONTES DE PRONÓSTICO
+# ------------------------
+#   FECHA_EVAL  = ayer (o el argumento pasado)
+#   RUN_D1      = FECHA_EVAL       → dia1 del run  (+24 h)
+#   RUN_D2      = FECHA_EVAL − 1d  → dia2 del run  (+48 h)
+#   RUN_D3      = FECHA_EVAL − 2d  → dia3 del run  (+72 h)
 #
-# PREREQUISITOS
-# -------------
-#   - Python 3.8+ con: pandas, numpy, xarray, matplotlib, python-docx, dateutil
-#   - R con paquete rsinaica instalado
-#   - bash >= 4 (para arrays asociativos)
-#   - awk, sort, sed (POSIX estándar)
-#   - Los scripts auxiliares deben estar en DIR_SCRIPTS:
-#       baja_CAMe.py
-#       calidad_aire_pipeline.sh
-#       extract_dia.py       (generado por este script si no existe)
-#       stats_dia.py         (generado por este script si no existe)
+# USO
+# ---
+#   bash evaluacion_diaria.sh [YYYY-MM-DD]
+#
+#   Sin argumento : evalúa el día anterior al actual  (modo crontab)
+#   Con argumento : evalúa la fecha indicada           (modo reproceso)
+#
+#   Ejemplos:
+#     bash evaluacion_diaria.sh
+#     bash evaluacion_diaria.sh 2026-03-15
 #
 # INSTALACIÓN EN CRONTAB
 # ----------------------
-# Editar crontab con:  crontab -e
-# Agregar la línea (ejecuta cada día a las 07:00):
+#   crontab -e
+#   # Ejecutar cada día a las 07:00 con log rotativo:
+#   0 7 * * * /opt/wrf/evaluacion/evaluacion_diaria.sh \
+#             >> /opt/wrf/evaluacion/logs/cron_$(date +\%Y\%m\%d).log 2>&1
 #
-#   0 7 * * * /ruta/completa/a/evaluacion_diaria.sh >> /ruta/logs/cron.log 2>&1
+# PREREQUISITOS
+# -------------
+#   Sistema : bash >= 4, curl, awk, sort, sed, python3 >= 3.8
+#   Python  : ver requirements.txt
+#   Scripts : sinaica_descarga.sh, calidad_aire_pipeline.sh
+#             (deben estar en el mismo directorio que este script)
 #
-# O con rotación de log por fecha:
+# VARIABLES DE ENTORNO (opcionales)
+# ----------------------------------
+#   EVALUACION_DIR   Ruta del proyecto        [default: directorio del script]
+#   WRF_DIR          Ruta de archivos wrfout  [default: ver SECCIÓN 1]
+#   PYTHON_BIN       Ejecutable Python        [default: python3]
+#   SINAICA_TIPO     Tipo de datos SINAICA    [default: "" (Crude)]
+#                    "" = crudos  |  V = validados  |  M = manual
 #
-#   0 7 * * * /ruta/completa/a/evaluacion_diaria.sh \
-#             >> /ruta/logs/evaluacion_$(date +\%Y\%m\%d).log 2>&1
-#
-# ESTRUCTURA DE DIRECTORIOS
-# -------------------------
-# DIR_PROYECTO/
-# ├── evaluacion_diaria.sh          ← este script
-# ├── baja_CAMe.py
-# ├── calidad_aire_pipeline.sh
-# ├── extract_dia.py                ← generado automáticamente
-# ├── stats_dia.py                  ← generado automáticamente
-# ├── observado/                    ← CSVs consolidados de observaciones
-# ├── modelo/                       ← CSVs históricos del modelo
-# ├── combinado/
-# │   └── ajustados/
-# ├── logs/                         ← logs de cada ejecución
-# ├── web/                          ← raíz del sitio web
-# │   ├── index.html                ← índice histórico
-# │   ├── css/
-# │   │   └── estilo.css
-# │   └── YYYY/
-# │       └── MM/
-# │           └── evaluacion_YYYY-MM-DD.html
-# └── tmp/                          ← archivos temporales (se limpian al final)
+# CONFIGURACIÓN DE ESTACIONES
+# ----------------------------
+#   conf/estaciones.conf  (TSV, generado automáticamente la primera vez)
+#   Formato: ESTACION_ID <TAB> CIUDAD_WRF <TAB> CONT_SINAICA <TAB>
+#            NOMBRE_RED  <TAB> NOMBRE_ESTACION
 #
 # AUTOR
 # -----
-# Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
-# Versión: 1.0  |  Fecha: 2026
+#   Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
+#   v2.0.0  |  2026
 #
 # =============================================================================
 
@@ -90,26 +86,46 @@ set -euo pipefail
 
 # =============================================================================
 # ── SECCIÓN 1: CONFIGURACIÓN GLOBAL ──────────────────────────────────────────
+# Todas las variables configurables están aquí.  No modificar el resto
+# del script salvo para correcciones de lógica.
 # =============================================================================
 
-# --- Rutas principales --------------------------------------------------------
-DIR_PROYECTO="/home/wrf/evaluacion"          # ← CAMBIAR a la ruta del proyecto
-DIR_WRF="/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM"  # ← directorio WRF-Chem
-DIR_WEB="${DIR_PROYECTO}/web"                # raíz del servidor web
-DIR_LOGS="${DIR_PROYECTO}/logs"
-DIR_TMP="${DIR_PROYECTO}/tmp"
+# --------------------------------------------------------------------------
+# 1.1  Rutas base
+# --------------------------------------------------------------------------
+# DIR_PROYECTO: directorio raíz del repositorio.
+# Por defecto es el directorio que contiene este script (portable).
+DIR_PROYECTO="${EVALUACION_DIR:-$( cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )}"
+
+# Raíz del almacenamiento WRF-Chem.
+# Los wrfout se buscan en: ${DIR_WRF}/<ANIO>/wrfout_d01_YYYY-MM-DD_00:00:00
+DIR_WRF="${WRF_DIR:-/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM}"
+
+# --------------------------------------------------------------------------
+# 1.2  Subdirectorios del proyecto
+# --------------------------------------------------------------------------
+DIR_SCRIPTS="${DIR_PROYECTO}"
+DIR_CONF="${DIR_PROYECTO}/conf"
 DIR_OBS="${DIR_PROYECTO}/observado"
 DIR_MODELO="${DIR_PROYECTO}/modelo"
 DIR_COMBINADO="${DIR_PROYECTO}/combinado"
 DIR_AJUSTADOS="${DIR_COMBINADO}/ajustados"
+DIR_LOGS="${DIR_PROYECTO}/logs"
+DIR_TMP="${DIR_PROYECTO}/tmp"
+DIR_WEB="${DIR_PROYECTO}/web"
 
-# --- Ejecutables --------------------------------------------------------------
-PYTHON="python3"                             # ← ajustar si se usa virtualenv
-RSCRIPT="Rscript"
+# --------------------------------------------------------------------------
+# 1.3  Ejecutables
+# --------------------------------------------------------------------------
+PYTHON="${PYTHON_BIN:-python3}"
+SINAICA_SH="${DIR_SCRIPTS}/sinaica_descarga.sh"
+PIPELINE_SH="${DIR_SCRIPTS}/calidad_aire_pipeline.sh"
 
-# --- Ciudades del dominio -----------------------------------------------------
-# Formato: "NOMBRE:lat_sur:lat_norte:lon_oeste:lon_este"
-declare -a CIUDADES=(
+# --------------------------------------------------------------------------
+# 1.4  Ciudades del dominio WRF-Chem
+# --------------------------------------------------------------------------
+# Formato: "NOMBRE_MODELO:lat_sur:lat_norte:lon_oeste:lon_este"
+declare -a CIUDADES_WRF=(
     "CDMX:19.20:19.70:-99.30:-98.85"
     "Toluca:19.23:19.39:-99.72:-99.50"
     "Puebla:18.95:19.12:-98.32:-98.10"
@@ -119,95 +135,241 @@ declare -a CIUDADES=(
     "SJdelRio:20.36:20.41:-100.01:-99.93"
 )
 
-# --- Parámetros de evaluación -------------------------------------------------
-CONTAMINANTES=("o3" "PM10" "PM25")
-UMBRAL_O3=135          # ppbv — umbral dicotómico NOM-020-SSA1
-UMBRAL_PM10=75         # µg/m³ — promedio 24h NOM-025-SSA1
-UMBRAL_PM25=45         # µg/m³ — promedio 24h NOM-025-SSA1
-BOOTSTRAP_N=10000      # número de remuestras bootstrap
+# Mapeo nombre modelo → prefijo del consolidado de observaciones
+declare -A CIUDAD_OBS_MAP=(
+    [CDMX]="Valle_de_Mexico"
+    [Toluca]="Toluca"
+    [Puebla]="Puebla"
+    [Tlaxcala]="Tlaxcala"
+    [Pachuca]="Pachuca"
+    [Cuernavaca]="Cuernavaca"
+    [SJdelRio]="San_Juan_del_Rio"
+)
 
-# --- Fechas de evaluación -----------------------------------------------------
-# FECHA_EVAL: día que se evalúa = ayer
-# Los tres archivos wrfout que cubren ese día son:
-#   RUN_D1: iniciado en FECHA_EVAL       → su dia1 cubre FECHA_EVAL
-#   RUN_D2: iniciado en FECHA_EVAL - 1d  → su dia2 cubre FECHA_EVAL
-#   RUN_D3: iniciado en FECHA_EVAL - 2d  → su dia3 cubre FECHA_EVAL
-FECHA_EVAL=$(date -d "yesterday" +%Y-%m-%d)
+# --------------------------------------------------------------------------
+# 1.5  Contaminantes y umbrales normativos
+# --------------------------------------------------------------------------
+# Umbrales para métricas dicotómicas:
+#   O3   → NOM-020-SSA1      (135 ppbv)
+#   PM10 → NOM-025-SSA1-2021 ( 75 µg/m³ promedio 24 h)
+#   PM25 → NOM-025-SSA1-2021 ( 45 µg/m³ promedio 24 h)
+declare -A UMBRAL=([o3]=135 [PM10]=75 [PM25]=45)
+CONTAMINANTES_MODELO=("o3" "PM10" "PM25")
+
+# --------------------------------------------------------------------------
+# 1.6  Parámetros de descarga SINAICA
+# --------------------------------------------------------------------------
+SINAICA_TIPO="${SINAICA_TIPO:-}"    # "" = Crude; "V" = Validated; "M" = Manual
+SINAICA_RANGO="1dia"               # rango por ejecución diaria
+DESCARGA_REINTENTOS=3              # reintentos ante error HTTP
+DESCARGA_PAUSA=2                   # segundos entre reintentos
+REGISTROS_MINIMOS=18               # mínimo de horas para considerar descarga válida
+
+# --------------------------------------------------------------------------
+# 1.7  Parámetros estadísticos
+# --------------------------------------------------------------------------
+VENTANA_DIAS=30    # días de histórico para métricas de contexto
+
+# --------------------------------------------------------------------------
+# 1.8  Fecha de evaluación
+# --------------------------------------------------------------------------
+# Acepta argumento posicional $1 en formato YYYY-MM-DD.
+# Sin argumento: evalúa el día anterior (modo crontab normal).
+if [[ "${1:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    FECHA_EVAL="$1"
+    MODO_EJECUCION="REPROCESO"
+elif [[ -z "${1:-}" ]]; then
+    FECHA_EVAL=$(date -d "yesterday" +%Y-%m-%d)
+    MODO_EJECUCION="AUTOMATICO"
+else
+    echo "ERROR: argumento inválido '${1}'. Use YYYY-MM-DD o sin argumento." >&2
+    exit 1
+fi
+
+# Derivar los tres runs que cubren FECHA_EVAL
 RUN_D1="${FECHA_EVAL}"
-RUN_D2=$(date -d "${FECHA_EVAL} -1 day" +%Y-%m-%d)
+RUN_D2=$(date -d "${FECHA_EVAL} -1 day"  +%Y-%m-%d)
 RUN_D3=$(date -d "${FECHA_EVAL} -2 days" +%Y-%m-%d)
 
 ANIO_EVAL=$(date -d "${FECHA_EVAL}" +%Y)
-MES_EVAL=$(date -d  "${FECHA_EVAL}" +%m)
-DIA_EVAL=$(date -d  "${FECHA_EVAL}" +%d)
+MES_EVAL=$( date -d "${FECHA_EVAL}" +%m)
+
+# Marca de tiempo de inicio (para calcular duración al final)
+TS_INICIO=$(date +%s)
 
 # =============================================================================
 # ── SECCIÓN 2: FUNCIONES UTILITARIAS ─────────────────────────────────────────
 # =============================================================================
 
-# Colores para log (se desactivan si no hay TTY)
-if [ -t 1 ]; then
+# --------------------------------------------------------------------------
+# 2.1  Colores (se desactivan si la salida no es una TTY)
+# --------------------------------------------------------------------------
+if [[ -t 1 ]]; then
     C_GRN="\033[0;32m"; C_YLW="\033[1;33m"
-    C_CYN="\033[0;36m"; C_RED="\033[0;31m"; C_RST="\033[0m"
+    C_CYN="\033[0;36m"; C_RED="\033[0;31m"
+    C_BLD="\033[1m";    C_RST="\033[0m"
 else
-    C_GRN=""; C_YLW=""; C_CYN=""; C_RED=""; C_RST=""
+    C_GRN=""; C_YLW=""; C_CYN=""; C_RED=""; C_BLD=""; C_RST=""
 fi
 
-# Timestamp para cada línea de log
-ts()    { date "+%Y-%m-%d %H:%M:%S"; }
-info()  { echo -e "$(ts) ${C_CYN}[INFO]${C_RST}  $*" | tee -a "${LOG_FILE}"; }
-ok()    { echo -e "$(ts) ${C_GRN}[OK]${C_RST}    $*" | tee -a "${LOG_FILE}"; }
-warn()  { echo -e "$(ts) ${C_YLW}[WARN]${C_RST}  $*" | tee -a "${LOG_FILE}"; }
-error() { echo -e "$(ts) ${C_RED}[ERROR]${C_RST} $*" | tee -a "${LOG_FILE}" >&2; }
-die()   { error "$*"; exit 1; }
+# --------------------------------------------------------------------------
+# 2.2  Funciones de log
+# --------------------------------------------------------------------------
+# LOG_FILE se define en la Sección 3, después de crear DIR_LOGS.
+# Hasta ese momento las funciones escriben solo a stdout.
+_ts()   { date "+%Y-%m-%d %H:%M:%S"; }
 
-# Verificar si un comando existe
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || die "Comando requerido no encontrado: $1"
+info()  { echo -e "$(_ts) ${C_CYN}[INFO]${C_RST}  $*" | tee -a "${LOG_FILE:-/dev/null}"; }
+ok()    { echo -e "$(_ts) ${C_GRN}[OK]  ${C_RST}  $*" | tee -a "${LOG_FILE:-/dev/null}"; }
+warn()  { echo -e "$(_ts) ${C_YLW}[WARN]${C_RST}  $*" | tee -a "${LOG_FILE:-/dev/null}"; }
+error() { echo -e "$(_ts) ${C_RED}[ERROR]${C_RST} $*" | tee -a "${LOG_FILE:-/dev/null}" >&2; }
+step()  {
+    local linea
+    linea="$(_ts) ${C_BLD}${C_CYN}▶  $*${C_RST}"
+    echo -e "\n${linea}" | tee -a "${LOG_FILE:-/dev/null}"
 }
 
-# Obtener ruta del wrfout según la convención del servidor
+# Abortar con mensaje y código 1
+die() { error "$*"; exit 1; }
+
+# --------------------------------------------------------------------------
+# 2.3  Verificaciones de dependencias
+# --------------------------------------------------------------------------
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 \
+        || die "Dependencia no encontrada: '$1'. Verificar la instalación."
+}
+
+require_file() {
+    [[ -f "$1" ]] || die "Archivo requerido no encontrado: $1"
+}
+
+# --------------------------------------------------------------------------
+# 2.4  Construcción de ruta wrfout
+# --------------------------------------------------------------------------
+# Convención del servidor: <DIR_WRF>/<ANIO>/wrfout_d01_YYYY-MM-DD_00:00:00
 wrfout_path() {
     local fecha="$1"
     local anio; anio=$(date -d "$fecha" +%Y)
     echo "${DIR_WRF}/${anio}/wrfout_d01_${fecha}_00:00:00"
 }
 
+# --------------------------------------------------------------------------
+# 2.5  Descarga de una estación con reintentos
+# --------------------------------------------------------------------------
+# Envuelve sinaica_descarga.sh añadiendo reintentos automáticos y logging.
+# Retorna 0 si la descarga fue exitosa, 1 si falló todos los reintentos.
+#
+# Uso: descargar_estacion <id> <param> <fecha> <archivo_csv>
+descargar_estacion() {
+    local est_id="$1"
+    local param="$2"
+    local fecha="$3"
+    local destino="$4"
+    local intento=1
+
+    while (( intento <= DESCARGA_REINTENTOS )); do
+        # sinaica_descarga.sh escribe sus propios mensajes a stderr;
+        # los redirigimos al log para no contaminar stdout del orquestador.
+        if bash "${SINAICA_SH}" \
+               -e "${est_id}" \
+               -p "${param}" \
+               -f "${fecha}" \
+               -r "${SINAICA_RANGO}" \
+               ${SINAICA_TIPO:+-t "${SINAICA_TIPO}"} \
+               -c \
+               -o "${destino}" \
+               2>>"${LOG_FILE:-/dev/null}"; then
+            return 0
+        fi
+        warn "    Intento ${intento}/${DESCARGA_REINTENTOS} fallido (id=${est_id}, param=${param})"
+        (( intento++ )) || true
+        sleep "${DESCARGA_PAUSA}"
+    done
+
+    warn "    Descarga fallida tras ${DESCARGA_REINTENTOS} intentos: id=${est_id}, param=${param}"
+    return 1
+}
+
+# --------------------------------------------------------------------------
+# 2.6  Contar registros de un CSV (excluye encabezado)
+# --------------------------------------------------------------------------
+contar_registros() {
+    local archivo="$1"
+    [[ -f "${archivo}" ]] || { echo 0; return; }
+    echo $(( $(wc -l < "${archivo}") - 1 ))
+}
+
+# --------------------------------------------------------------------------
+# 2.7  Validar CSV descargado
+# --------------------------------------------------------------------------
+# Retorna 0 si el CSV tiene al menos REGISTROS_MINIMOS filas de datos.
+validar_csv() {
+    local archivo="$1"
+    local n; n=$(contar_registros "${archivo}")
+    if (( n >= REGISTROS_MINIMOS )); then
+        return 0
+    else
+        warn "    CSV inválido o insuficiente: ${archivo##*/} (${n} registros, mínimo ${REGISTROS_MINIMOS})"
+        return 1
+    fi
+}
+
 # =============================================================================
 # ── SECCIÓN 3: INICIALIZACIÓN ────────────────────────────────────────────────
 # =============================================================================
 
-# Crear directorios si no existen
-mkdir -p "${DIR_LOGS}" "${DIR_TMP}" "${DIR_OBS}" \
-         "${DIR_MODELO}" "${DIR_COMBINADO}" "${DIR_AJUSTADOS}" \
-         "${DIR_WEB}/css" "${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}"
+# Crear árbol de directorios completo
+mkdir -p \
+    "${DIR_LOGS}" "${DIR_TMP}" "${DIR_CONF}" \
+    "${DIR_OBS}"  "${DIR_MODELO}" \
+    "${DIR_COMBINADO}" "${DIR_AJUSTADOS}" \
+    "${DIR_WEB}/css" "${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}" \
+    "${DIR_TMP}/raw_sinaica" "${DIR_TMP}/extraidos" \
+    "${DIR_TMP}/pipeline_work"
 
-# Archivo de log para esta ejecución
+# Definir LOG_FILE ahora que DIR_LOGS existe
 LOG_FILE="${DIR_LOGS}/evaluacion_${FECHA_EVAL}.log"
 
-# Limpiar tmp de ejecuciones anteriores
-rm -f "${DIR_TMP}"/*.tmp "${DIR_TMP}"/*.csv "${DIR_TMP}"/*.py 2>/dev/null || true
+# Limpiar scripts Python temporales de ejecuciones anteriores
+find "${DIR_TMP}" -maxdepth 1 \( -name "*.py" -o -name "*.tmp" \) \
+    -delete 2>/dev/null || true
 
-info "============================================================"
-info " EVALUACIÓN DIARIA DE PRONÓSTICO — WRF-Chem"
-info " Fecha de evaluación : ${FECHA_EVAL}"
-info " Archivos wrfout analizados:"
-info "   Día 1 (run ${RUN_D1}): Horizonte 24h"
-info "   Día 2 (run ${RUN_D2}): Horizonte 48h"
-info "   Día 3 (run ${RUN_D3}): Horizonte 72h"
-info "============================================================"
-
-# Verificar dependencias
-require_cmd "${PYTHON}"
-require_cmd "${RSCRIPT}"
+# --------------------------------------------------------------------------
+# 3.1  Verificar dependencias del sistema
+# --------------------------------------------------------------------------
+require_cmd bash
+require_cmd curl
 require_cmd awk
 require_cmd sort
+require_cmd python3
+require_cmd "${PYTHON}"
+require_file "${SINAICA_SH}"
+require_file "${PIPELINE_SH}"
+
+# --------------------------------------------------------------------------
+# 3.2  Encabezado del log
+# --------------------------------------------------------------------------
+{
+printf '%s\n' \
+  "============================================================" \
+  " EVALUACIÓN DIARIA WRF-Chem  v2.0.0" \
+  " Modo          : ${MODO_EJECUCION}" \
+  " Fecha eval    : ${FECHA_EVAL}" \
+  " Run D1 (+24h) : ${RUN_D1}" \
+  " Run D2 (+48h) : ${RUN_D2}" \
+  " Run D3 (+72h) : ${RUN_D3}" \
+  " Python        : $("${PYTHON}" --version 2>&1)" \
+  " Log           : ${LOG_FILE}" \
+  " Inicio        : $(date '+%Y-%m-%d %H:%M:%S')" \
+  "============================================================"
+} | tee -a "${LOG_FILE}"
 
 # =============================================================================
 # ── SECCIÓN 4: VERIFICAR ARCHIVOS WRFOUT ─────────────────────────────────────
 # =============================================================================
 
-info "── Etapa 1: Verificando disponibilidad de archivos WRF-Chem ──"
+step "Etapa 1 — Verificación de archivos WRF-Chem"
 
 declare -A WRFOUT_OK=()
 declare -A WRFOUT_PATH=()
@@ -215,911 +377,936 @@ declare -A WRFOUT_PATH=()
 for run_fecha in "${RUN_D1}" "${RUN_D2}" "${RUN_D3}"; do
     ruta=$(wrfout_path "${run_fecha}")
     WRFOUT_PATH["${run_fecha}"]="${ruta}"
-    if [ -f "${ruta}" ]; then
-        ok "  Encontrado: $(basename "${ruta}")"
+    if [[ -f "${ruta}" ]]; then
+        sz=$(du -sh "${ruta}" 2>/dev/null | cut -f1)
+        ok "  ✓ ${run_fecha}  →  $(basename "${ruta}")  [${sz}]"
         WRFOUT_OK["${run_fecha}"]=1
     else
-        warn "  NO encontrado: ${ruta}"
+        warn "  ✗ ${run_fecha}  →  NO encontrado: ${ruta}"
         WRFOUT_OK["${run_fecha}"]=0
     fi
 done
 
-# Si ningún wrfout está disponible, abortar
-n_disponibles=0
+# Contar cuántos están disponibles; si ninguno, abortar.
+n_wrfout=0
 for run_fecha in "${RUN_D1}" "${RUN_D2}" "${RUN_D3}"; do
-    [[ "${WRFOUT_OK[${run_fecha}]}" -eq 1 ]] && (( n_disponibles++ )) || true
+    [[ "${WRFOUT_OK[${run_fecha}]}" -eq 1 ]] && (( n_wrfout++ )) || true
 done
 
-if [ "${n_disponibles}" -eq 0 ]; then
-    die "No hay archivos wrfout disponibles para ${FECHA_EVAL}. Abortando."
+(( n_wrfout > 0 )) || die "Ningún archivo wrfout disponible para ${FECHA_EVAL}."
+info "  wrfout disponibles: ${n_wrfout}/3"
+
+# =============================================================================
+# ── SECCIÓN 5: DESCARGA DE OBSERVACIONES (sinaica_descarga.sh) ───────────────
+# =============================================================================
+#
+# Esta sección reemplaza completamente baja_CAMe.py / R / rsinaica.
+#
+# Lee conf/estaciones.conf para obtener los IDs de estación y parámetros,
+# luego invoca sinaica_descarga.sh por cada combinación.
+# El CSV resultante tiene el esquema real del API SINAICA (2026):
+#   id, fecha, hora, valor, bandO, val, estacion_id, parametro
+#
+# =============================================================================
+
+step "Etapa 2 — Descarga de observaciones (sinaica_descarga.sh)"
+
+# --------------------------------------------------------------------------
+# 5.1  Generar plantilla de estaciones.conf si no existe
+# --------------------------------------------------------------------------
+CONF_EST="${DIR_CONF}/estaciones.conf"
+
+if [[ ! -f "${CONF_EST}" ]]; then
+    warn "  ${CONF_EST} no encontrado. Creando plantilla..."
+    cat > "${CONF_EST}" << 'EOF'
+# =============================================================================
+# conf/estaciones.conf  —  Catálogo de estaciones SINAICA
+# =============================================================================
+# Formato: campos separados por TAB (no espacios)
+#
+#   ESTACION_ID  CIUDAD_WRF  CONT_SINAICA  NOMBRE_RED           NOMBRE_ESTACION
+#
+# CONT_SINAICA : O3 | PM10 | PM2.5
+# CIUDAD_WRF   : CDMX | Toluca | Puebla | Tlaxcala | Pachuca | Cuernavaca | SJdelRio
+#
+# PASOS PARA COMPLETAR:
+#   1. Ir a https://sinaica.inecc.gob.mx  →  Datos  →  buscar la estación
+#   2. El ID numérico aparece en la URL (ej. estacionId=249)
+#   3. Reemplazar los IDs de ejemplo (999) por los reales
+#   4. Agregar / eliminar filas según necesidad
+#   5. Las líneas que empiezan con # son comentarios y se ignoran
+#
+# Estaciones de ejemplo verificadas (IDs ilustrativos — verificar en SINAICA):
+# ---------------------------------------------------------------------------
+249	CDMX	O3	Valle de México	Merced
+250	CDMX	PM10	Valle de México	Merced
+251	CDMX	PM2.5	Valle de México	Merced
+999	Toluca	O3	Toluca	Toluca Centro
+999	Toluca	PM10	Toluca	Toluca Centro
+999	Toluca	PM2.5	Toluca	Toluca Centro
+999	Puebla	O3	Puebla	Las Ninfas
+999	Puebla	PM10	Puebla	Las Ninfas
+999	Tlaxcala	O3	Tlaxcala	Palacio de Gobierno
+999	Tlaxcala	PM10	Tlaxcala	Palacio de Gobierno
+501	Pachuca	O3	Pachuca	Primaria Ignacio Zaragoza
+501	Pachuca	PM10	Pachuca	Primaria Ignacio Zaragoza
+999	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
+999	Cuernavaca	PM10	Cuernavaca	Cuernavaca 01
+999	SJdelRio	O3	San Juan del Rio	San Juan del Rio
+999	SJdelRio	PM10	San Juan del Rio	San Juan del Rio
+EOF
+    warn "  Plantilla creada. Editar ${CONF_EST} con los IDs reales."
 fi
 
-info "  Archivos disponibles: ${n_disponibles}/3"
+# --------------------------------------------------------------------------
+# 5.2  Iterar sobre el catálogo y descargar
+# --------------------------------------------------------------------------
+DIR_RAW="${DIR_TMP}/raw_sinaica/${FECHA_EVAL}"
+mkdir -p "${DIR_RAW}"
 
-# =============================================================================
-# ── SECCIÓN 5: DESCARGAR OBSERVACIONES ───────────────────────────────────────
-# =============================================================================
+n_ok=0; n_fallo=0; n_omitido=0
 
-info "── Etapa 2: Descargando observaciones de SINAICA ──"
+while IFS=$'\t' read -r est_id ciudad_wrf cont_sinaica nombre_red nombre_est \
+      || [[ -n "${est_id:-}" ]]; do
 
-# Generar script Python temporal que modifica baja_CAMe.py para descargar
-# solo el día de evaluación (FECHA_EVAL)
-cat > "${DIR_TMP}/baja_dia.py" << PYEOF
-# Script de descarga para UN día específico
-# Invoca baja_CAMe.py con fechas acotadas al día de evaluación
-import sys, os
+    # Ignorar comentarios y líneas en blanco
+    [[ "${est_id:-}" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${est_id:-}"               ]] && continue
 
-sys.path.insert(0, "${DIR_PROYECTO}")
+    # Ignorar IDs de ejemplo para evitar peticiones HTTP inútiles
+    if [[ "${est_id}" == "999" ]]; then
+        warn "  Omitiendo ID de ejemplo (999): ${nombre_est} / ${cont_sinaica}"
+        (( n_omitido++ )) || true
+        continue
+    fi
 
-# Parchear las fechas antes de importar
-import importlib.util, types
+    # Nombre seguro del contaminante para el nombre de archivo (sin puntos)
+    cont_safe="${cont_sinaica//./}"
 
-# Leer código fuente de baja_CAMe.py
-with open("${DIR_PROYECTO}/baja_CAMe.py", "r", encoding="utf-8") as fh:
-    src = fh.read()
+    # Destino del CSV: raw_sinaica/<fecha>/sinaica_<id>_<cont>_<fecha>.csv
+    csv_dest="${DIR_RAW}/sinaica_${est_id}_${cont_safe}_${FECHA_EVAL}.csv"
 
-# Reemplazar el rango de fechas con el día de evaluación
-from datetime import datetime
-fecha_eval = datetime.strptime("${FECHA_EVAL}", "%Y-%m-%d")
-fecha_fin  = datetime.strptime("${FECHA_EVAL}", "%Y-%m-%d")
+    # En modo reproceso, omitir si ya existe y tiene datos suficientes
+    if [[ "${MODO_EJECUCION}" == "REPROCESO" ]] && validar_csv "${csv_dest}" 2>/dev/null; then
+        info "  ↷ Reutilizando: $(basename "${csv_dest}") ($(contar_registros "${csv_dest}") reg)"
+        (( n_ok++ )) || true
+        continue
+    fi
 
-import re
-src = re.sub(
-    r'FECHA_INICIO\s*=\s*datetime\([^)]+\)',
-    f'FECHA_INICIO = datetime({fecha_eval.year}, {fecha_eval.month}, {fecha_eval.day})',
-    src
-)
-src = re.sub(
-    r'FECHA_FIN\s*=\s*.*',
-    f'FECHA_FIN = datetime({fecha_fin.year}, {fecha_fin.month}, {fecha_fin.day + 1})',
-    src
-)
+    info "  ↓ est=${est_id} | ${nombre_est} | ${cont_sinaica} | ${nombre_red}"
 
-# Cambiar directorio de trabajo para que los CSV se generen en DIR_PROYECTO
-os.chdir("${DIR_PROYECTO}")
+    if descargar_estacion "${est_id}" "${cont_sinaica}" "${FECHA_EVAL}" "${csv_dest}"; then
+        if validar_csv "${csv_dest}"; then
+            ok "    ✓ $(basename "${csv_dest}") — $(contar_registros "${csv_dest}") registros"
+            (( n_ok++ )) || true
+        else
+            # El archivo existe pero con pocos datos: se conserva para diagnóstico
+            (( n_fallo++ )) || true
+        fi
+    else
+        (( n_fallo++ )) || true
+    fi
 
-exec(compile(src, "baja_CAMe.py", "exec"))
-PYEOF
+done < "${CONF_EST}"
 
-cd "${DIR_PROYECTO}"
-if ${PYTHON} "${DIR_TMP}/baja_dia.py"; then
-    ok "  Descarga de observaciones completada."
-else
-    warn "  Error en descarga. Se intentará continuar con observaciones anteriores."
+info "  Resultado descarga — OK: ${n_ok} | Fallidos: ${n_fallo} | Omitidos: ${n_omitido}"
+
+if (( n_ok == 0 )); then
+    warn "  Sin observaciones nuevas. Continuando con datos previos en ${DIR_OBS}."
 fi
 
 # =============================================================================
-# ── SECCIÓN 6: PROCESAR OBSERVACIONES ────────────────────────────────────────
+# ── SECCIÓN 6: NORMALIZACIÓN DE CSV PARA calidad_aire_pipeline.sh ────────────
+# =============================================================================
+#
+# sinaica_descarga.sh produce CSV con los campos del API actual (2026):
+#   id, fecha, hora, valor, bandO, val, estacion_id, parametro
+#
+# calidad_aire_pipeline.sh espera archivos llamados:
+#   calidad_aire_<Ciudad>_<Estacion>.csv
+# cuya primera columna identifica el contaminante (contiene O3, PM10, PM2.5).
+#
+# Esta sección transforma los CSV de descarga al formato esperado por el
+# pipeline, construyendo un identificador de fila compatible:
+#   <estacion_id><CONT><fechahora>
+#
 # =============================================================================
 
-info "── Etapa 3: Procesando observaciones (separación y consolidación) ──"
+step "Etapa 3 — Normalización de CSV al formato del pipeline"
 
-cd "${DIR_PROYECTO}"
+DIR_PW="${DIR_TMP}/pipeline_work"
+mkdir -p "${DIR_PW}"
+rm -f "${DIR_PW}"/calidad_aire_*.csv 2>/dev/null || true
 
-# Verificar que existan archivos calidad_aire_*.csv
+n_norm=0
+
+while IFS=$'\t' read -r est_id ciudad_wrf cont_sinaica nombre_red nombre_est \
+      || [[ -n "${est_id:-}" ]]; do
+
+    [[ "${est_id:-}" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${est_id:-}"               ]] && continue
+    [[ "${est_id}" == "999"           ]] && continue
+
+    cont_safe="${cont_sinaica//./}"
+    csv_src="${DIR_RAW}/sinaica_${est_id}_${cont_safe}_${FECHA_EVAL}.csv"
+    [[ -f "${csv_src}" ]]                               || continue
+    (( $(contar_registros "${csv_src}") > 0 )) 2>/dev/null || continue
+
+    # Nombre de estación seguro para el nombre de archivo del pipeline
+    est_safe="${nombre_est// /_}"
+    # Transliterar caracteres especiales del español
+    est_safe=$(echo "${est_safe}" \
+      | sed 'y/áéíóúÁÉÍÓÚñÑ/aeiouAEIOUnN/')
+
+    # Archivo destino del pipeline: calidad_aire_<Ciudad>_<Estacion>.csv
+    destino_pipeline="${DIR_PW}/calidad_aire_${ciudad_wrf}_${est_safe}.csv"
+
+    # --------------------------------------------------------------------------
+    # Construir columna de identificación compatible con el filtro awk del
+    # pipeline.  El pipeline filtra con:
+    #   id ~ /O3/     id ~ /PM10/ && id !~ /PM2\.5/     id ~ /PM2\.5/
+    #
+    # Formato de la columna id que generamos:
+    #   <estacion_id><CONT_SINAICA><YYYYMMDD><HH>
+    # Ejemplo: 249O32026022400  →  filtra O3
+    #          250PM102026022400 →  filtra PM10
+    #          251PM2.52026022400 → filtra PM2.5
+    # --------------------------------------------------------------------------
+
+    # Encabezado del pipeline: station_param_id,date,hour,value,[resto...]
+    HDR="station_param_id,date,hour,value,flag,valid,station_id,parametro"
+
+    if [[ ! -f "${destino_pipeline}" ]]; then
+        echo "${HDR}" > "${destino_pipeline}"
+    fi
+
+    # El CSV de sinaica_descarga.sh tiene:
+    # id,fecha,hora,valor,bandO,val,estacion_id,parametro
+    # Cols: 1=id  2=fecha  3=hora  4=valor  5=bandO  6=val  7=estacion_id  8=parametro
+    awk -F',' -v eid="${est_id}" -v cont="${cont_sinaica}" \
+        'NR==1 { next }           # saltar encabezado original
+         NF < 4 { next }          # saltar filas vacías / corruptas
+         {
+             # Construir id compatible con el filtro awk del pipeline
+             gsub(/-/,"",$2)       # YYYY-MM-DD → YYYYMMDD
+             printf "%s%s%s%02d,%s,%s,%s,%s,%s,%s,%s\n",
+                 eid, cont, $2, $3+0,
+                 $2, $3, $4, $5, $6, eid, cont
+         }' "${csv_src}" >> "${destino_pipeline}"
+
+    (( n_norm++ )) || true
+
+done < "${CONF_EST}"
+
+info "  Archivos normalizados para el pipeline: ${n_norm}"
+
+# =============================================================================
+# ── SECCIÓN 7: PROCESAR OBSERVACIONES (calidad_aire_pipeline.sh) ─────────────
+# =============================================================================
+
+step "Etapa 4 — Procesamiento con calidad_aire_pipeline.sh"
+
 shopt -s nullglob
-archivos_raw=( calidad_aire_*.csv )
+archivos_pw=( "${DIR_PW}"/calidad_aire_*.csv )
 shopt -u nullglob
 
-if [ ${#archivos_raw[@]} -eq 0 ]; then
-    warn "  No se encontraron archivos calidad_aire_*.csv. Saltando procesamiento."
+if (( ${#archivos_pw[@]} == 0 )); then
+    warn "  Sin archivos calidad_aire_*.csv. Se usarán observaciones previas de ${DIR_OBS}."
 else
-    info "  Archivos de observación encontrados: ${#archivos_raw[@]}"
-    if bash "${DIR_PROYECTO}/calidad_aire_pipeline.sh"; then
+    info "  Archivos a procesar: ${#archivos_pw[@]}"
+
+    # calidad_aire_pipeline.sh crea salida/ y consolidado/ relativos al CWD
+    pushd "${DIR_PW}" > /dev/null
+
+    if bash "${PIPELINE_SH}"; then
         ok "  Pipeline de observaciones completado."
-        # Copiar consolidados a observado/
-        n_consolidados=0
-        for f in "${DIR_PROYECTO}/consolidado/"*_consolidado.csv; do
-            [ -f "$f" ] || continue
-            cp "$f" "${DIR_OBS}/"
-            (( n_consolidados++ )) || true
+
+        # Copiar consolidados al directorio canónico de observaciones
+        n_cop=0
+        shopt -s nullglob
+        for f in "${DIR_PW}/consolidado/"*_consolidado.csv; do
+            cp "${f}" "${DIR_OBS}/"
+            (( n_cop++ )) || true
         done
-        ok "  Archivos consolidados copiados a observado/: ${n_consolidados}"
+        shopt -u nullglob
+        ok "  Consolidados copiados a ${DIR_OBS}/: ${n_cop} archivos"
     else
-        warn "  Error en pipeline de observaciones."
+        warn "  Error en calidad_aire_pipeline.sh. Continuando con datos previos."
     fi
+
+    popd > /dev/null
 fi
 
 # =============================================================================
-# ── SECCIÓN 7: EXTRAER VARIABLES DEL MODELO ──────────────────────────────────
+# ── SECCIÓN 8: EXTRACCIÓN DEL MODELO WRFOUT (extract_dia.py) ─────────────────
 # =============================================================================
 
-info "── Etapa 4: Extrayendo variables del modelo WRF-Chem ──"
+step "Etapa 5 — Extracción de variables WRF-Chem"
 
-# Generar script Python de extracción para un archivo wrfout específico
+# Generar el script Python de extracción en tmp/
+# (se regenera en cada ejecución; no hay estado entre corridas)
 cat > "${DIR_TMP}/extract_dia.py" << 'PYEOF'
 #!/usr/bin/env python3
 """
-extract_dia.py
-Extrae O3, PM10 y PM2.5 de un archivo wrfout para una fecha y horizonte dados.
-Uso: python extract_dia.py <ruta_wrfout> <fecha_run> <horizonte> <dir_salida>
-  horizonte: 1 = dia1 (indices 6-29), 2 = dia2 (indices 30-53), 3 = dia3 (indices 54-71)
+extract_dia.py  —  Extractor de variables de superficie de WRF-Chem.
+
+Argumentos posicionales:
+    1  ruta_wrfout          path completo al archivo NetCDF
+    2  fecha_run            YYYY-MM-DD del inicio del run
+    3  horizonte            1, 2 o 3
+    4  dir_salida           directorio donde guardar los CSV de extracción
+
+Salida por ciudad y contaminante:
+    <dir_salida>/ext_<cont>_<ciudad>_h<horizonte>.csv
+    Columnas: Fecha, Ciudad, horizonte, valor
+
+Convenciones:
+    O3   → máximo espacial del máximo temporal en la ventana (ppbv, ppmv × 1000)
+    PM10 → promedio de los máximos espaciales por hora en la ventana (µg/m³)
+    PM25 → ídem PM10 para PM2.5 (µg/m³)
+
+Ventanas horarias (índices del eje Time del wrfout, hora local = UTC − 6):
+    horizonte 1 → slice(6, 30)   Día 0: 00:00–23:00 local (24 h)
+    horizonte 2 → slice(30, 54)  Día 1: 00:00–23:00 local (24 h)
+    horizonte 3 → slice(54, 72)  Día 2: 00:00–17:00 local (18 h)
 """
-import sys, os
+import sys
+import os
 import xarray as xr
 import numpy as np
 import pandas as pd
 
-ruta_wrf   = sys.argv[1]
-fecha_run  = sys.argv[2]
-horizonte  = int(sys.argv[3])
-dir_salida = sys.argv[4]
+# ── Argumentos ────────────────────────────────────────────────────────────────
+if len(sys.argv) != 5:
+    sys.exit("Uso: extract_dia.py <wrfout> <fecha_run> <horizonte 1|2|3> <dir_salida>")
 
+RUTA_WRF   = sys.argv[1]
+FECHA_RUN  = sys.argv[2]
+HORIZONTE  = int(sys.argv[3])
+DIR_SAL    = sys.argv[4]
+
+# ── Bounding boxes por ciudad ─────────────────────────────────────────────────
 CIUDADES = [
-    {"nombre": "CDMX",       "lat1": 19.20, "lon1": -99.30, "lat2": 19.70, "lon2": -98.85},
-    {"nombre": "Toluca",     "lat1": 19.23, "lon1": -99.72, "lat2": 19.39, "lon2": -99.50},
-    {"nombre": "Puebla",     "lat1": 18.95, "lon1": -98.32, "lat2": 19.12, "lon2": -98.10},
-    {"nombre": "Tlaxcala",   "lat1": 19.29, "lon1": -98.26, "lat2": 19.36, "lon2": -98.15},
-    {"nombre": "Pachuca",    "lat1": 20.03, "lon1": -98.80, "lat2": 20.13, "lon2": -98.67},
-    {"nombre": "Cuernavaca", "lat1": 18.89, "lon1": -99.26, "lat2": 18.98, "lon2": -99.14},
-    {"nombre": "SJdelRio",   "lat1": 20.36, "lon1": -100.01,"lat2": 20.41, "lon2": -99.93},
+    {"nombre": "CDMX",       "lat1": 19.20, "lat2": 19.70, "lon1": -99.30, "lon2": -98.85},
+    {"nombre": "Toluca",     "lat1": 19.23, "lat2": 19.39, "lon1": -99.72, "lon2": -99.50},
+    {"nombre": "Puebla",     "lat1": 18.95, "lat2": 19.12, "lon1": -98.32, "lon2": -98.10},
+    {"nombre": "Tlaxcala",   "lat1": 19.29, "lat2": 19.36, "lon1": -98.26, "lon2": -98.15},
+    {"nombre": "Pachuca",    "lat1": 20.03, "lat2": 20.13, "lon1": -98.80, "lon2": -98.67},
+    {"nombre": "Cuernavaca", "lat1": 18.89, "lat2": 18.98, "lon1": -99.26, "lon2": -99.14},
+    {"nombre": "SJdelRio",   "lat1": 20.36, "lat2": 20.41, "lon1": -100.01,"lon2": -99.93},
 ]
 
-# Rangos de tiempo según horizonte (hora local UTC-6)
-RANGOS = {
-    1: slice(6,  30),   # Día 1: 24 horas
-    2: slice(30, 54),   # Día 2: 24 horas
-    3: slice(54, 72),   # Día 3: 18 horas
-}
+RANGOS = {1: slice(6, 30), 2: slice(30, 54), 3: slice(54, 72)}
 
+# Nombres posibles de variables PM según la versión / configuración de WRF-Chem
 VARS_PM = {
     "PM10": ["PM10", "pm10"],
     "PM25": ["PM2_5_DRY", "PM2_5", "pm2_5_dry", "pm2_5"],
 }
 
-def encontrar_var(ds, nombres):
-    for n in nombres:
-        if n in ds.variables:
-            return n
-    return None
 
-if not os.path.exists(ruta_wrf):
-    print(f"[EXTRACT] Archivo no encontrado: {ruta_wrf}", file=sys.stderr)
-    sys.exit(1)
+def var_disponible(ds: xr.Dataset, nombres: list) -> str | None:
+    return next((n for n in nombres if n in ds.variables), None)
 
-print(f"[EXTRACT] Abriendo: {os.path.basename(ruta_wrf)} | Horizonte {horizonte}")
+
+def extraer_o3(ds, mask, rango) -> float:
+    o3 = ds["o3"].isel(bottom_top=0).where(mask) * 1000.0  # ppmv → ppbv
+    return float(o3.isel(Time=rango).max(skipna=True).values)
+
+
+def extraer_pm(ds, var_nombre: str, mask, rango) -> float:
+    var = ds[var_nombre]
+    if "bottom_top" in var.dims:
+        var = var.isel(bottom_top=0)
+    max_esp = var.where(mask).max(dim=["south_north", "west_east"], skipna=True)
+    return float(max_esp.isel(Time=rango).mean(skipna=True).values)
+
+
+# ── Apertura del dataset ───────────────────────────────────────────────────────
+if not os.path.exists(RUTA_WRF):
+    sys.exit(f"[EXTRACT] ERROR: {RUTA_WRF} no encontrado.")
+
+print(f"[EXTRACT] {os.path.basename(RUTA_WRF)}  horizonte={HORIZONTE}")
 
 try:
-    ds = xr.open_dataset(ruta_wrf, decode_times=False)
-except Exception as e:
-    print(f"[EXTRACT] Error abriendo NetCDF: {e}", file=sys.stderr)
-    sys.exit(1)
+    ds = xr.open_dataset(RUTA_WRF, decode_times=False)
+except Exception as exc:
+    sys.exit(f"[EXTRACT] ERROR abriendo NetCDF: {exc}")
 
-rango = RANGOS[horizonte]
+rango = RANGOS[HORIZONTE]
 lat   = ds["XLAT"][0, :, :]
 lon   = ds["XLONG"][0, :, :]
+os.makedirs(DIR_SAL, exist_ok=True)
 
-os.makedirs(dir_salida, exist_ok=True)
-
-for ciudad in CIUDADES:
+# ── Procesar cada ciudad ───────────────────────────────────────────────────────
+for c in CIUDADES:
     mask = (
-        (lat >= ciudad["lat1"]) & (lat <= ciudad["lat2"]) &
-        (lon >= ciudad["lon1"]) & (lon <= ciudad["lon2"])
+        (lat >= c["lat1"]) & (lat <= c["lat2"]) &
+        (lon >= c["lon1"]) & (lon <= c["lon2"])
     )
-    row = {"Fecha": fecha_run, "Ciudad": ciudad["nombre"], "horizonte": horizonte}
+    res = {}
 
-    # ── O3: máximo espacial del máximo temporal ──────────────────────────────
+    # O3
     try:
-        o3_sfc  = ds["o3"].isel(bottom_top=0).where(mask) * 1000  # ppmv→ppbv
-        o3_rng  = o3_sfc.isel(Time=rango)
-        row["o3"] = float(o3_rng.max().values)
-    except Exception as e:
-        row["o3"] = float("nan")
-        print(f"[EXTRACT] O3 error {ciudad['nombre']}: {e}")
+        res["o3"] = extraer_o3(ds, mask, rango)
+    except Exception as exc:
+        res["o3"] = float("nan")
+        print(f"  [EXTRACT] O3 {c['nombre']}: {exc}")
 
-    # ── PM10 y PM2.5: promedio de máximos espaciales ─────────────────────────
-    for contaminante, nombres_var in VARS_PM.items():
-        var_nombre = encontrar_var(ds, nombres_var)
-        if var_nombre is None:
-            row[contaminante] = float("nan")
+    # PM10 y PM25
+    for cont, nombres in VARS_PM.items():
+        vn = var_disponible(ds, nombres)
+        if vn is None:
+            res[cont] = float("nan")
+            print(f"  [EXTRACT] {cont} no encontrado en {os.path.basename(RUTA_WRF)}")
             continue
         try:
-            var_data = ds[var_nombre]
-            if "bottom_top" in var_data.dims:
-                var_sfc = var_data.isel(bottom_top=0)
-            else:
-                var_sfc = var_data
-            var_reg = var_sfc.where(mask)
-            max_esp = var_reg.max(dim=["south_north","west_east"], skipna=True)
-            row[contaminante] = float(max_esp.isel(Time=rango).mean(skipna=True).values)
-        except Exception as e:
-            row[contaminante] = float("nan")
-            print(f"[EXTRACT] {contaminante} error {ciudad['nombre']}: {e}")
+            res[cont] = extraer_pm(ds, vn, mask, rango)
+        except Exception as exc:
+            res[cont] = float("nan")
+            print(f"  [EXTRACT] {cont} {c['nombre']}: {exc}")
 
-    # Guardar fila en CSV por ciudad y contaminante
-    for cont in ["o3", "PM10", "PM25"]:
-        csv_out = os.path.join(dir_salida, f"ext_{cont}_{ciudad['nombre']}_h{horizonte}.csv")
+    # Guardar un CSV por contaminante
+    for cont_key in ["o3", "PM10", "PM25"]:
+        out = os.path.join(DIR_SAL, f"ext_{cont_key}_{c['nombre']}_h{HORIZONTE}.csv")
         pd.DataFrame([{
-            "Fecha": fecha_run,
-            "Ciudad": ciudad["nombre"],
-            "horizonte": horizonte,
-            "valor": row.get(cont, float("nan"))
-        }]).to_csv(csv_out, index=False)
+            "Fecha": FECHA_RUN, "Ciudad": c["nombre"],
+            "horizonte": HORIZONTE, "valor": res.get(cont_key, float("nan")),
+        }]).to_csv(out, index=False)
 
-    print(f"  {ciudad['nombre']:<12} O3={row.get('o3',float('nan')):.1f} ppbv | "
-          f"PM10={row.get('PM10',float('nan')):.1f} | PM25={row.get('PM25',float('nan')):.1f} µg/m³")
+    print(
+        f"  {c['nombre']:<12}  "
+        f"O3={res.get('o3', float('nan')):.1f} ppbv  "
+        f"PM10={res.get('PM10', float('nan')):.1f}  "
+        f"PM25={res.get('PM25', float('nan')):.1f} µg/m³"
+    )
 
 ds.close()
-print(f"[EXTRACT] Completado: horizonte {horizonte}")
+print(f"[EXTRACT] Horizonte {HORIZONTE} completado.")
 PYEOF
 
-# Ejecutar extracción para cada run disponible
+# Ejecutar la extracción para cada run disponible
 for run_fecha in "${RUN_D1}" "${RUN_D2}" "${RUN_D3}"; do
-    if [ "${WRFOUT_OK[${run_fecha}]}" -eq 0 ]; then
-        warn "  Saltando run ${run_fecha} (archivo no disponible)"
+    [[ "${WRFOUT_OK[${run_fecha}]}" -eq 1 ]] || {
+        warn "  Saltando run ${run_fecha} (wrfout no disponible)"
         continue
-    fi
+    }
 
-    # Determinar qué horizonte de este run corresponde a FECHA_EVAL
-    if   [ "${run_fecha}" = "${RUN_D1}" ]; then horizonte=1
-    elif [ "${run_fecha}" = "${RUN_D2}" ]; then horizonte=2
+    # Horizonte según posición temporal respecto a FECHA_EVAL
+    if   [[ "${run_fecha}" == "${RUN_D1}" ]]; then horizonte=1
+    elif [[ "${run_fecha}" == "${RUN_D2}" ]]; then horizonte=2
     else horizonte=3
     fi
 
-    info "  Extrayendo run ${run_fecha} → horizonte ${horizonte}..."
-    if ${PYTHON} "${DIR_TMP}/extract_dia.py" \
+    info "  run=${run_fecha}  →  horizonte ${horizonte}..."
+
+    if "${PYTHON}" "${DIR_TMP}/extract_dia.py" \
             "${WRFOUT_PATH[${run_fecha}]}" \
             "${run_fecha}" \
             "${horizonte}" \
-            "${DIR_TMP}/extraidos"; then
-        ok "  Extracción horizonte ${horizonte} completada."
+            "${DIR_TMP}/extraidos" >> "${LOG_FILE}" 2>&1; then
+        ok "  ✓ Extracción horizonte ${horizonte} OK."
     else
-        warn "  Error en extracción horizonte ${horizonte}."
+        warn "  ✗ Error en extracción horizonte ${horizonte} — ver ${LOG_FILE}"
     fi
 done
 
 # =============================================================================
-# ── SECCIÓN 8: COMBINAR OBSERVACIONES + MODELO PARA FECHA_EVAL ───────────────
+# ── SECCIÓN 9: COMBINAR OBSERVACIONES + MODELO (combinar_dia.py) ─────────────
 # =============================================================================
 
-info "── Etapa 5: Combinando observaciones y modelo para ${FECHA_EVAL} ──"
+step "Etapa 6 — Combinación observaciones + modelo"
 
 cat > "${DIR_TMP}/combinar_dia.py" << PYEOF
 #!/usr/bin/env python3
 """
-Combina el máximo observado del día con los tres horizontes del modelo
-para la fecha de evaluación. Genera un CSV por ciudad y contaminante.
+combinar_dia.py  —  Une el máximo observado del día con los tres horizontes del modelo.
+
+Lee:
+  - ${DIR_OBS}/<Ciudad_OBS>_<Cont_OBS>_consolidado.csv
+  - ${DIR_TMP}/extraidos/ext_<cont>_<ciudad>_h<n>.csv
+
+Escribe:
+  - ${DIR_AJUSTADOS}/eval_<cont>_<ciudad>_${FECHA_EVAL}.csv
+    Columnas: Fecha, Ciudad, max_obs, mod_dia1, mod_dia2, mod_dia3
 """
 import os, glob
 import pandas as pd
 import numpy as np
 
-FECHA_EVAL   = "${FECHA_EVAL}"
-DIR_OBS      = "${DIR_OBS}"
-DIR_EXTRAIDOS= "${DIR_TMP}/extraidos"
-DIR_SALIDA   = "${DIR_AJUSTADOS}"
+FECHA_EVAL    = "${FECHA_EVAL}"
+DIR_OBS       = "${DIR_OBS}"
+DIR_EXTRAIDOS = "${DIR_TMP}/extraidos"
+DIR_SALIDA    = "${DIR_AJUSTADOS}"
 os.makedirs(DIR_SALIDA, exist_ok=True)
 
 CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
-CIUDADES_OBS = {
-    "CDMX":       "Valle_de_México",
-    "Toluca":     "Toluca",
-    "Puebla":     "Puebla",
-    "Tlaxcala":   "Tlaxcala",
-    "Pachuca":    "Pachuca",
-    "Cuernavaca": "Cuernavaca",
-    "SJdelRio":   "San_Juan_del_Rio",
+
+CIUDAD_OBS = {
+    "CDMX":       "${CIUDAD_OBS_MAP[CDMX]}",
+    "Toluca":     "${CIUDAD_OBS_MAP[Toluca]}",
+    "Puebla":     "${CIUDAD_OBS_MAP[Puebla]}",
+    "Tlaxcala":   "${CIUDAD_OBS_MAP[Tlaxcala]}",
+    "Pachuca":    "${CIUDAD_OBS_MAP[Pachuca]}",
+    "Cuernavaca": "${CIUDAD_OBS_MAP[Cuernavaca]}",
+    "SJdelRio":   "${CIUDAD_OBS_MAP[SJdelRio]}",
 }
-CONTAMINANTES = ["o3","PM10","PM25"]
-CONT_OBS_NAME = {"o3":"O3","PM10":"PM10","PM25":"PM2.5"}
-FACTOR_CONV   = {"o3":1000, "PM10":1, "PM25":1}  # O3: ppmv→ppbv
+CONT_OBS_LABEL = {"o3": "O3", "PM10": "PM10", "PM25": "PM2.5"}
+FACTOR_CONV    = {"o3": 1000.0, "PM10": 1.0, "PM25": 1.0}
 
-for cont in CONTAMINANTES:
+for cont in ["o3","PM10","PM25"]:
     for ciudad in CIUDADES:
-        # ── 1. Leer observaciones del día ────────────────────────────────────
-        nombre_obs = CIUDADES_OBS.get(ciudad, ciudad)
-        patron_obs = os.path.join(DIR_OBS, f"{nombre_obs}_{CONT_OBS_NAME[cont]}_consolidado.csv")
-        archivos_obs = glob.glob(patron_obs)
+        # ── Observaciones ──────────────────────────────────────────────────────
+        patron   = os.path.join(DIR_OBS,
+            f"{CIUDAD_OBS[ciudad]}_{CONT_OBS_LABEL[cont]}_consolidado.csv")
+        archivos = glob.glob(patron)
+        max_obs  = np.nan
 
-        max_obs = np.nan
-        if archivos_obs:
+        if archivos:
             try:
-                df_obs = pd.read_csv(archivos_obs[0])
-                df_obs["date"] = pd.to_datetime(df_obs["date"])
-                dia = df_obs[df_obs["date"].dt.strftime("%Y-%m-%d") == FECHA_EVAL]
+                df = pd.read_csv(archivos[0])
+                # El consolidado puede tener columna 'date' (baja_CAMe) o 'fecha' (sinaica_descarga)
+                col_f = "date" if "date" in df.columns else "fecha"
+                df[col_f] = pd.to_datetime(df[col_f])
+                dia = df[df[col_f].dt.strftime("%Y-%m-%d") == FECHA_EVAL]
                 if not dia.empty:
-                    cols_vals = [c for c in dia.columns if c not in ("date","hour")]
-                    vals = dia[cols_vals].apply(pd.to_numeric, errors="coerce")
-                    factor = FACTOR_CONV.get(cont, 1)
-                    max_obs = float(vals.max().max()) * factor
-            except Exception as e:
-                print(f"  [COMB] Error leyendo obs {ciudad}/{cont}: {e}")
+                    cols_v = [c for c in dia.columns
+                              if c not in (col_f, "date","fecha","hour","hora")]
+                    vals   = dia[cols_v].apply(pd.to_numeric, errors="coerce")
+                    max_obs = float(vals.max().max()) * FACTOR_CONV[cont]
+            except Exception as exc:
+                print(f"  [COMB] Error obs {ciudad}/{cont}: {exc}")
+        else:
+            print(f"  [COMB] Sin archivo obs: {patron}")
 
-        # ── 2. Leer valores del modelo por horizonte ─────────────────────────
+        # ── Modelo (tres horizontes) ───────────────────────────────────────────
         mod = {}
-        for h in [1, 2, 3]:
-            csv_ext = os.path.join(DIR_EXTRAIDOS, f"ext_{cont}_{ciudad}_h{h}.csv")
-            if os.path.exists(csv_ext):
+        for h in [1,2,3]:
+            csv_h = os.path.join(DIR_EXTRAIDOS, f"ext_{cont}_{ciudad}_h{h}.csv")
+            if os.path.exists(csv_h):
                 try:
-                    df_ext = pd.read_csv(csv_ext)
-                    val = df_ext["valor"].iloc[0] if not df_ext.empty else np.nan
-                    mod[f"mod_dia{h}"] = float(val)
+                    df_h = pd.read_csv(csv_h)
+                    mod[f"mod_dia{h}"] = float(df_h["valor"].iloc[0]) if not df_h.empty else np.nan
                 except Exception:
                     mod[f"mod_dia{h}"] = np.nan
             else:
                 mod[f"mod_dia{h}"] = np.nan
 
-        # ── 3. Guardar fila combinada ─────────────────────────────────────────
-        fila = {
-            "Fecha":    FECHA_EVAL,
-            "Ciudad":   ciudad,
-            "max_obs":  max_obs,
-            "mod_dia1": mod.get("mod_dia1", np.nan),
-            "mod_dia2": mod.get("mod_dia2", np.nan),
-            "mod_dia3": mod.get("mod_dia3", np.nan),
-        }
+        # ── Guardar fila combinada ─────────────────────────────────────────────
+        fila = {"Fecha": FECHA_EVAL, "Ciudad": ciudad, "max_obs": max_obs,
+                "mod_dia1": mod.get("mod_dia1",np.nan),
+                "mod_dia2": mod.get("mod_dia2",np.nan),
+                "mod_dia3": mod.get("mod_dia3",np.nan)}
         csv_out = os.path.join(DIR_SALIDA, f"eval_{cont}_{ciudad}_{FECHA_EVAL}.csv")
         pd.DataFrame([fila]).to_csv(csv_out, index=False)
-        print(f"  {ciudad:<12} {cont:<5} obs={max_obs:.1f if not pd.isna(max_obs) else 'NA'!s} "
-              f"| d1={mod.get('mod_dia1',float('nan')):.1f} "
-              f"d2={mod.get('mod_dia2',float('nan')):.1f} "
-              f"d3={mod.get('mod_dia3',float('nan')):.1f}")
 
-print("[COMB] Combinación completada.")
+        obs_s = f"{max_obs:.1f}" if not pd.isna(max_obs) else "NA"
+        print(f"  {ciudad:<12} {cont:<5}  obs={obs_s:>7}"
+              f"  d1={str(round(mod.get('mod_dia1',float('nan')),1)):>7}"
+              f"  d2={str(round(mod.get('mod_dia2',float('nan')),1)):>7}"
+              f"  d3={str(round(mod.get('mod_dia3',float('nan')),1)):>7}")
+
+print("[COMB] Completado.")
 PYEOF
 
-if ${PYTHON} "${DIR_TMP}/combinar_dia.py"; then
+if "${PYTHON}" "${DIR_TMP}/combinar_dia.py" >> "${LOG_FILE}" 2>&1; then
     ok "  Combinación obs+modelo completada."
 else
-    warn "  Error en combinación. Continuando con datos disponibles."
+    warn "  Error en combinación — ver ${LOG_FILE}"
 fi
 
 # =============================================================================
-# ── SECCIÓN 9: CALCULAR MÉTRICAS ESTADÍSTICAS ────────────────────────────────
+# ── SECCIÓN 10: CALCULAR MÉTRICAS ESTADÍSTICAS (stats_dia.py) ────────────────
 # =============================================================================
 
-info "── Etapa 6: Calculando métricas estadísticas ──"
+step "Etapa 7 — Cálculo de métricas estadísticas (ventana ${VENTANA_DIAS} días)"
 
 cat > "${DIR_TMP}/stats_dia.py" << PYEOF
 #!/usr/bin/env python3
 """
-Calcula métricas de validación para el día de evaluación.
-Lee los CSV de evaluacion histórica (todos los eval_*.csv disponibles)
-y calcula estadísticos con ventana de los últimos 30 días para dar contexto.
-Genera un JSON con los resultados que usa el generador HTML.
+stats_dia.py  —  Métricas de validación para la fecha de evaluación.
+
+Carga todos los CSV en combinado/ajustados/, aplica una ventana deslizante de
+${VENTANA_DIAS} días y calcula métricas continuas y dicotómicas por horizonte.
+Exporta el resultado como JSON para ser consumido por generar_html.py.
 """
 import os, glob, json
 import pandas as pd
 import numpy as np
 
-FECHA_EVAL   = "${FECHA_EVAL}"
-DIR_AJUSTADOS= "${DIR_AJUSTADOS}"
-DIR_SALIDA   = "${DIR_TMP}"
+FECHA_EVAL    = "${FECHA_EVAL}"
+DIR_AJUSTADOS = "${DIR_AJUSTADOS}"
+DIR_TMP       = "${DIR_TMP}"
+VENTANA_DIAS  = ${VENTANA_DIAS}
+UMBRAL        = {"o3": ${UMBRAL[o3]}, "PM10": ${UMBRAL[PM10]}, "PM25": ${UMBRAL[PM25]}}
 
-CIUDADES     = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
-CONTAMINANTES= ["o3","PM10","PM25"]
-UMBRAL       = {"o3": ${UMBRAL_O3}, "PM10": ${UMBRAL_PM10}, "PM25": ${UMBRAL_PM25}}
-B            = ${BOOTSTRAP_N}
+CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
 
-def metricas_continuas(obs, mod):
-    """Métricas continuas básicas (sin bootstrap para evaluación diaria rápida)."""
+
+def metricas_continuas(obs: np.ndarray, mod: np.ndarray) -> dict:
     mask = ~(np.isnan(obs) | np.isnan(mod))
     o, m = obs[mask], mod[mask]
     if len(o) < 2:
         return {}
-    bias = float(np.mean(m - o))
-    rmse = float(np.sqrt(np.mean((m - o)**2)))
-    mae  = float(np.mean(np.abs(m - o)))
-    corr_mat = np.corrcoef(o, m)
-    r    = float(corr_mat[0,1]) if corr_mat.shape == (2,2) else float("nan")
-    return {"n": int(len(o)), "bias": bias, "rmse": rmse, "mae": mae, "r": r,
-            "obs_mean": float(np.mean(o)), "mod_mean": float(np.mean(m))}
-
-def metricas_dicotomicas(obs, mod, umbral):
-    """Métricas dicotómicas para umbral dado."""
-    mask = ~(np.isnan(obs) | np.isnan(mod))
-    o, m = (obs[mask] > umbral).astype(int), (mod[mask] > umbral).astype(int)
-    N = len(o)
-    if N == 0:
-        return {}
-    H = int(np.sum((o==1)&(m==1)))
-    M = int(np.sum((o==1)&(m==0)))
-    F = int(np.sum((o==0)&(m==1)))
-    C = int(np.sum((o==0)&(m==0)))
-    sd = lambda a,b: round(a/b,3) if b>0 else None
+    r_mat = np.corrcoef(o, m)
     return {
-        "umbral": umbral, "H": H, "M": M, "F": F, "C": C,
-        "POD": sd(H, H+M), "FAR": sd(F, H+F),
-        "CSI": sd(H, H+M+F), "PC":  sd(H+C, N),
-        "TSS": round((sd(H,H+M) or 0) - (sd(F,F+C) or 0), 3),
+        "n":        int(len(o)),
+        "bias":     round(float(np.mean(m - o)),            3),
+        "rmse":     round(float(np.sqrt(np.mean((m-o)**2))),3),
+        "mae":      round(float(np.mean(np.abs(m - o))),    3),
+        "r":        round(float(r_mat[0, 1]),                3),
+        "obs_mean": round(float(np.mean(o)),                 3),
+        "mod_mean": round(float(np.mean(m)),                 3),
     }
 
-resultados = {}
 
-for cont in CONTAMINANTES:
-    resultados[cont] = {}
+def metricas_dicotomicas(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict:
+    mask = ~(np.isnan(obs) | np.isnan(mod))
+    ob = (obs[mask] > umbral).astype(int)
+    mb = (mod[mask] > umbral).astype(int)
+    N  = len(ob)
+    if N == 0:
+        return {}
+    H = int(np.sum((ob==1)&(mb==1)))
+    M = int(np.sum((ob==1)&(mb==0)))
+    F = int(np.sum((ob==0)&(mb==1)))
+    C = int(np.sum((ob==0)&(mb==0)))
+    _d = lambda a, b: round(a/b, 3) if b > 0 else None
+    return {
+        "umbral": umbral, "H": H, "M": M, "F": F, "C": C,
+        "PC":  _d(H+C, N),
+        "POD": _d(H, H+M),
+        "FAR": _d(F, H+F),
+        "CSI": _d(H, H+M+F),
+        "TSS": round((_d(H,H+M) or 0) - (_d(F,F+C) or 0), 3),
+    }
+
+
+resultado = {}
+
+for cont in ["o3","PM10","PM25"]:
+    resultado[cont] = {}
     for ciudad in CIUDADES:
-        resultados[cont][ciudad] = {}
-
-        # Cargar todos los CSVs de evaluación disponibles (histórico rolling)
-        patron = os.path.join(DIR_AJUSTADOS, f"eval_{cont}_{ciudad}_*.csv")
-        archivos = sorted(glob.glob(patron))
+        archivos = sorted(glob.glob(
+            os.path.join(DIR_AJUSTADOS, f"eval_{cont}_{ciudad}_*.csv")))
 
         if not archivos:
-            resultados[cont][ciudad] = {"error": "sin_datos"}
+            resultado[cont][ciudad] = {"error": "sin_datos"}
             continue
 
         df = pd.concat([pd.read_csv(f) for f in archivos], ignore_index=True)
         df["Fecha"] = pd.to_datetime(df["Fecha"])
         df = df.sort_values("Fecha").drop_duplicates("Fecha")
 
-        # Fila del día de evaluación
+        # Valor del día de evaluación
         fila_hoy = df[df["Fecha"].dt.strftime("%Y-%m-%d") == FECHA_EVAL]
-
-        # Ventana 30 días para métricas de contexto
-        fecha_ini = pd.to_datetime(FECHA_EVAL) - pd.Timedelta(days=30)
-        df_30 = df[df["Fecha"] >= fecha_ini].dropna(subset=["max_obs","mod_dia1"])
-
-        stats_dia = {}
-        for h_key in ["mod_dia1","mod_dia2","mod_dia3"]:
-            obs = df_30["max_obs"].values
-            mod = df_30[h_key].values if h_key in df_30.columns else np.array([])
-            if len(obs) < 2 or len(mod) < 2:
-                stats_dia[h_key] = {}
-                continue
-            stats_dia[h_key] = {
-                "continuas":   metricas_continuas(obs, mod),
-                "dicotomicas": metricas_dicotomicas(obs, mod, UMBRAL[cont]),
-            }
-
-        # Valor del día
-        valor_hoy = {}
+        val_hoy  = {}
         if not fila_hoy.empty:
             for col in ["max_obs","mod_dia1","mod_dia2","mod_dia3"]:
                 v = fila_hoy[col].values[0] if col in fila_hoy.columns else None
-                valor_hoy[col] = None if (v is None or (isinstance(v,float) and np.isnan(v))) else round(float(v),2)
+                val_hoy[col] = None if (v is None or
+                    (isinstance(v, float) and np.isnan(v))) else round(float(v), 2)
 
-        resultados[cont][ciudad] = {
-            "fecha_eval": FECHA_EVAL,
-            "n_historico": int(len(df_30)),
-            "valor_hoy":   valor_hoy,
-            "stats_30d":   stats_dia,
+        # Ventana histórica de VENTANA_DIAS días
+        f_ini = pd.to_datetime(FECHA_EVAL) - pd.Timedelta(days=VENTANA_DIAS)
+        df_v  = df[df["Fecha"] >= f_ini].dropna(subset=["max_obs","mod_dia1"])
+
+        stats = {}
+        for h in ["mod_dia1","mod_dia2","mod_dia3"]:
+            if h not in df_v.columns:
+                stats[h] = {}
+                continue
+            obs_a = df_v["max_obs"].values
+            mod_a = df_v[h].values
+            stats[h] = {
+                "continuas":   metricas_continuas(obs_a, mod_a),
+                "dicotomicas": metricas_dicotomicas(obs_a, mod_a, UMBRAL[cont]),
+            }
+
+        resultado[cont][ciudad] = {
+            "fecha_eval":  FECHA_EVAL,
+            "n_historico": int(len(df_v)),
+            "valor_hoy":   val_hoy,
+            "stats_30d":   stats,
         }
-        print(f"  {cont:<5} {ciudad:<12}: obs={valor_hoy.get('max_obs','NA')} "
-              f"d1={valor_hoy.get('mod_dia1','NA')} "
-              f"d2={valor_hoy.get('mod_dia2','NA')} "
-              f"d3={valor_hoy.get('mod_dia3','NA')}")
 
-# Guardar JSON
-json_out = os.path.join(DIR_SALIDA, "stats_${FECHA_EVAL}.json")
+        v = val_hoy
+        print(f"  {cont:<5} {ciudad:<12}  "
+              f"obs={str(v.get('max_obs','NA')):>7}  "
+              f"d1={str(v.get('mod_dia1','NA')):>7}  "
+              f"d2={str(v.get('mod_dia2','NA')):>7}  "
+              f"d3={str(v.get('mod_dia3','NA')):>7}")
+
+json_out = os.path.join(DIR_TMP, f"stats_{FECHA_EVAL}.json")
 with open(json_out, "w", encoding="utf-8") as fh:
-    json.dump(resultados, fh, ensure_ascii=False, indent=2, default=str)
-print(f"[STATS] JSON generado: {json_out}")
+    json.dump(resultado, fh, ensure_ascii=False, indent=2, default=str)
+print(f"[STATS] JSON: {json_out}")
 PYEOF
 
-if ${PYTHON} "${DIR_TMP}/stats_dia.py"; then
-    ok "  Estadísticos calculados."
+if "${PYTHON}" "${DIR_TMP}/stats_dia.py" >> "${LOG_FILE}" 2>&1; then
+    ok "  Métricas calculadas: ${DIR_TMP}/stats_${FECHA_EVAL}.json"
 else
-    warn "  Error en cálculo de estadísticos."
+    warn "  Error calculando métricas — ver ${LOG_FILE}"
 fi
 
 # =============================================================================
-# ── SECCIÓN 10: GENERAR PÁGINA HTML ──────────────────────────────────────────
+# ── SECCIÓN 11: GENERAR PÁGINA HTML (generar_html.py) ────────────────────────
 # =============================================================================
 
-info "── Etapa 7: Generando página HTML de resultados ──"
+step "Etapa 8 — Generación de página HTML"
 
-# ── Generar CSS (solo la primera vez o si no existe) ─────────────────────────
+# ── CSS base (se genera una sola vez) ────────────────────────────────────────
 CSS_FILE="${DIR_WEB}/css/estilo.css"
-if [ ! -f "${CSS_FILE}" ]; then
+if [[ ! -f "${CSS_FILE}" ]]; then
 cat > "${CSS_FILE}" << 'CSSEOF'
-/* ── Reset y base ─────────────────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-    --azul:      #1a4f8a;
-    --azul-claro:#2e78c7;
-    --gris-bg:   #f4f6f9;
-    --gris-brd:  #dde1e7;
-    --blanco:    #ffffff;
-    --texto:     #2c3e50;
-    --verde:     #27ae60;
-    --rojo:      #e74c3c;
-    --ambar:     #f39c12;
-    --morado:    #8e44ad;
-    --sombra:    0 2px 8px rgba(0,0,0,.12);
-}
-body { font-family: 'Segoe UI', Arial, sans-serif; background: var(--gris-bg);
-       color: var(--texto); line-height: 1.5; }
-a { color: var(--azul-claro); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-/* ── Encabezado ───────────────────────────────────────────────────────── */
-header { background: linear-gradient(135deg, var(--azul) 0%, var(--azul-claro) 100%);
-         color: white; padding: 1.4rem 2rem; display: flex;
-         align-items: center; gap: 1.2rem; box-shadow: var(--sombra); }
-header .logo { font-size: 2.4rem; }
-header h1 { font-size: 1.5rem; font-weight: 700; }
-header p  { font-size: .9rem; opacity: .85; }
-
-/* ── Navegación de pestañas ───────────────────────────────────────────── */
-.tabs { display: flex; gap: .4rem; padding: .8rem 2rem 0;
-        background: var(--blanco); border-bottom: 2px solid var(--gris-brd);
-        flex-wrap: wrap; }
-.tab-btn { padding: .5rem 1.1rem; border: none; border-radius: 6px 6px 0 0;
-           background: var(--gris-bg); cursor: pointer; font-size: .88rem;
-           font-weight: 600; color: var(--texto); transition: all .2s; }
-.tab-btn:hover { background: #d0dff5; }
-.tab-btn.active { background: var(--azul); color: white; }
-.tab-pane { display: none; padding: 1.5rem 2rem; }
-.tab-pane.active { display: block; }
-
-/* ── Tarjetas de ciudad ───────────────────────────────────────────────── */
-.ciudad-grid { display: grid;
-               grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-               gap: 1.2rem; margin-top: 1rem; }
-.ciudad-card { background: var(--blanco); border-radius: 10px;
-               box-shadow: var(--sombra); overflow: hidden; }
-.ciudad-card .card-header { background: var(--azul); color: white;
-               padding: .7rem 1rem; font-weight: 700; font-size: 1rem;
-               display: flex; align-items: center; gap: .5rem; }
-.ciudad-card .card-body { padding: 1rem; }
-
-/* ── Tabla de valores del día ─────────────────────────────────────────── */
-.tabla-dia { width: 100%; border-collapse: collapse; font-size: .87rem; }
-.tabla-dia th { background: var(--gris-bg); padding: .45rem .7rem;
-                text-align: left; font-weight: 600;
-                border-bottom: 2px solid var(--gris-brd); }
-.tabla-dia td { padding: .4rem .7rem; border-bottom: 1px solid var(--gris-brd); }
-.tabla-dia tr:last-child td { border-bottom: none; }
-
-/* ── Tabla de métricas (30 días) ──────────────────────────────────────── */
-.tabla-metricas { width: 100%; border-collapse: collapse;
-                  font-size: .82rem; margin-top: .7rem; }
-.tabla-metricas th { background: #e8edf4; padding: .38rem .6rem;
-                     text-align: center; font-size: .78rem;
-                     border: 1px solid var(--gris-brd); }
-.tabla-metricas td { padding: .35rem .6rem; text-align: center;
-                     border: 1px solid var(--gris-brd); }
-
-/* ── Chips de horizonte ───────────────────────────────────────────────── */
-.chip { display: inline-block; padding: .18rem .6rem; border-radius: 12px;
-        font-size: .78rem; font-weight: 700; margin-right: .3rem; }
-.chip-d1 { background: #fde8e8; color: #c0392b; }
-.chip-d2 { background: #e8f5e9; color: #1a7a3a; }
-.chip-d3 { background: #e3f2fd; color: #1557a0; }
-
-/* ── Semáforo de calidad ──────────────────────────────────────────────── */
-.semaforo { width: 14px; height: 14px; border-radius: 50%;
-            display: inline-block; margin-right: .35rem; vertical-align: middle; }
-.verde  { background: var(--verde); }
-.ambar  { background: var(--ambar); }
-.rojo   { background: var(--rojo); }
-.gris   { background: #999; }
-
-/* ── Sección de estadísticos ─────────────────────────────────────────── */
-.stats-section { margin-top: .8rem; }
-.stats-toggle { background: none; border: 1px solid var(--gris-brd);
-                border-radius: 6px; padding: .3rem .8rem; font-size: .8rem;
-                cursor: pointer; color: var(--azul-claro); }
-.stats-toggle:hover { background: #e8edf4; }
-.stats-detail { display: none; margin-top: .6rem; }
-.stats-detail.open { display: block; }
-
-/* ── Resumen general (cards de KPI) ───────────────────────────────────── */
-.kpi-grid { display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(160px,1fr));
-            gap: .9rem; margin: 1rem 0; }
-.kpi { background: var(--blanco); border-radius: 10px; padding: 1rem;
-       text-align: center; box-shadow: var(--sombra); }
-.kpi .kpi-val { font-size: 1.9rem; font-weight: 800; color: var(--azul); }
-.kpi .kpi-lbl { font-size: .78rem; color: #666; margin-top: .2rem; }
-
-/* ── Pie de página ────────────────────────────────────────────────────── */
-footer { text-align: center; padding: 1.5rem; color: #888;
-         font-size: .8rem; border-top: 1px solid var(--gris-brd);
-         margin-top: 2rem; }
-
-/* ── Responsive ──────────────────────────────────────────────────────── */
-@media (max-width: 600px) {
-    .ciudad-grid { grid-template-columns: 1fr; }
-    .kpi-grid    { grid-template-columns: repeat(2,1fr); }
-    .tabs        { padding: .5rem 1rem 0; }
-}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--az:#1a4f8a;--azc:#2e78c7;--gr:#f4f6f9;--brd:#dde1e7;--bl:#fff;
+  --tx:#2c3e50;--vd:#27ae60;--rj:#e74c3c;--am:#f39c12;--sh:0 2px 8px rgba(0,0,0,.12)}
+body{font-family:'Segoe UI',Arial,sans-serif;background:var(--gr);color:var(--tx);line-height:1.5}
+a{color:var(--azc);text-decoration:none}a:hover{text-decoration:underline}
+header{background:linear-gradient(135deg,var(--az),var(--azc));color:#fff;
+  padding:1.4rem 2rem;display:flex;align-items:center;gap:1.2rem;box-shadow:var(--sh)}
+header .logo{font-size:2.4rem}header h1{font-size:1.5rem;font-weight:700}
+header p{font-size:.9rem;opacity:.85}
+.tabs{display:flex;gap:.4rem;padding:.8rem 2rem 0;background:var(--bl);
+  border-bottom:2px solid var(--brd);flex-wrap:wrap}
+.tab-btn{padding:.5rem 1.1rem;border:none;border-radius:6px 6px 0 0;
+  background:var(--gr);cursor:pointer;font-size:.88rem;font-weight:600;
+  color:var(--tx);transition:all .2s}
+.tab-btn:hover{background:#d0dff5}.tab-btn.active{background:var(--az);color:#fff}
+.tab-pane{display:none;padding:1.5rem 2rem}.tab-pane.active{display:block}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1.2rem;margin-top:1rem}
+.card{background:var(--bl);border-radius:10px;box-shadow:var(--sh);overflow:hidden}
+.card .ch{background:var(--az);color:#fff;padding:.7rem 1rem;font-weight:700;
+  font-size:1rem;display:flex;align-items:center;gap:.5rem}
+.card .cb{padding:1rem}
+.td{width:100%;border-collapse:collapse;font-size:.87rem}
+.td th{background:var(--gr);padding:.45rem .7rem;text-align:left;
+  font-weight:600;border-bottom:2px solid var(--brd)}
+.td td{padding:.4rem .7rem;border-bottom:1px solid var(--brd)}
+.tm{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:.7rem}
+.tm th,.tm td{padding:.38rem .6rem;text-align:center;border:1px solid var(--brd)}
+.tm th{background:#e8edf4;font-size:.78rem}
+.chip{display:inline-block;padding:.18rem .6rem;border-radius:12px;font-size:.78rem;font-weight:700;margin-right:.3rem}
+.d1{background:#fde8e8;color:#c0392b}.d2{background:#e8f5e9;color:#1a7a3a}.d3{background:#e3f2fd;color:#1557a0}
+.sem{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:.35rem;vertical-align:middle}
+.vd{background:var(--vd)}.am{background:var(--am)}.rj{background:var(--rj)}.gr{background:#999}
+.st-btn{background:none;border:1px solid var(--brd);border-radius:6px;
+  padding:.3rem .8rem;font-size:.8rem;cursor:pointer;color:var(--azc);margin-top:.7rem}
+.st-det{display:none;margin-top:.6rem}.st-det.open{display:block}
+.kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.9rem;margin:1rem 0}
+.kpi{background:var(--bl);border-radius:10px;padding:1rem;text-align:center;box-shadow:var(--sh)}
+.kv{font-size:1.9rem;font-weight:800;color:var(--az)}.kl{font-size:.78rem;color:#666;margin-top:.2rem}
+footer{text-align:center;padding:1.5rem;color:#888;font-size:.8rem;
+  border-top:1px solid var(--brd);margin-top:2rem}
+@media(max-width:600px){.cgrid{grid-template-columns:1fr}
+  .kgrid{grid-template-columns:repeat(2,1fr)}.tabs{padding:.5rem 1rem 0}}
 CSSEOF
     ok "  CSS generado: ${CSS_FILE}"
 fi
 
-# ── Generar HTML con Python ───────────────────────────────────────────────────
+# ── Script Python de generación HTML ─────────────────────────────────────────
 cat > "${DIR_TMP}/generar_html.py" << PYEOF
 #!/usr/bin/env python3
-"""Genera la página HTML de evaluación diaria a partir del JSON de estadísticos."""
+"""generar_html.py — Genera la página HTML del día desde el JSON de métricas."""
 import json, os, math
 from datetime import datetime
 
-FECHA_EVAL    = "${FECHA_EVAL}"
-DIR_TMP       = "${DIR_TMP}"
-DIR_WEB       = "${DIR_WEB}"
-ANIO          = "${ANIO_EVAL}"
-MES           = "${MES_EVAL}"
+FECHA_EVAL = "${FECHA_EVAL}"
+DIR_TMP    = "${DIR_TMP}"
+DIR_WEB    = "${DIR_WEB}"
+ANIO       = "${ANIO_EVAL}"
+MES        = "${MES_EVAL}"
+VENTANA    = ${VENTANA_DIAS}
 
 json_path = os.path.join(DIR_TMP, f"stats_{FECHA_EVAL}.json")
 html_out  = os.path.join(DIR_WEB, ANIO, MES, f"evaluacion_{FECHA_EVAL}.html")
 
-CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
-ICONOS   = {"CDMX":"🏙️","Toluca":"🏔️","Puebla":"⛩️","Tlaxcala":"🌾",
-            "Pachuca":"⛏️","Cuernavaca":"🌺","SJdelRio":"🌊"}
-CONT_LABEL  = {"o3":"O₃ (ppbv)","PM10":"PM10 (µg/m³)","PM25":"PM2.5 (µg/m³)"}
-H_LABEL     = {"mod_dia1":"Día 0 (+24h)","mod_dia2":"Día 1 (+48h)","mod_dia3":"Día 2 (+72h)"}
-H_CHIP_CSS  = {"mod_dia1":"chip-d1","mod_dia2":"chip-d2","mod_dia3":"chip-d3"}
-UMBRAL      = {"o3":${UMBRAL_O3},"PM10":${UMBRAL_PM10},"PM25":${UMBRAL_PM25}}
+CIUDADES   = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
+ICONOS     = {"CDMX":"🏙️","Toluca":"🏔️","Puebla":"⛩️","Tlaxcala":"🌾",
+              "Pachuca":"⛏️","Cuernavaca":"🌺","SJdelRio":"🌊"}
+CLB        = {"o3":"O₃ (ppbv)","PM10":"PM10 (µg/m³)","PM25":"PM2.5 (µg/m³)"}
+HLB        = {"mod_dia1":"+24 h","mod_dia2":"+48 h","mod_dia3":"+72 h"}
+HCP        = {"mod_dia1":"d1","mod_dia2":"d2","mod_dia3":"d3"}
+UMBRAL     = {"o3":${UMBRAL[o3]},"PM10":${UMBRAL[PM10]},"PM25":${UMBRAL[PM25]}}
 
-def fmt(v, dec=1):
-    if v is None or (isinstance(v,float) and math.isnan(v)):
-        return "<span style='color:#aaa'>—</span>"
-    return f"{v:.{dec}f}"
+f_  = lambda v,d=1: "<span style='color:#aaa'>—</span>" if (
+    v is None or (isinstance(v,float) and math.isnan(v))) else f"{v:.{d}f}"
+sb_ = lambda b: "gr" if b is None else ("vd" if abs(b)<10 else ("am" if abs(b)<25 else "rj"))
+sr_ = lambda r: "gr" if r is None else ("vd" if r>=0.7 else ("am" if r>=0.4 else "rj"))
 
-def semaforo_bias(bias):
-    if bias is None: return "gris"
-    if abs(bias) < 10: return "verde"
-    if abs(bias) < 25: return "ambar"
-    return "rojo"
+datos = {}
+if os.path.exists(json_path):
+    with open(json_path, encoding="utf-8") as fh:
+        datos = json.load(fh)
 
-def semaforo_r(r):
-    if r is None: return "gris"
-    if r >= 0.7:  return "verde"
-    if r >= 0.4:  return "ambar"
-    return "rojo"
+fd  = datetime.strptime(FECHA_EVAL,"%Y-%m-%d")
+flt = fd.strftime("%d de %B de %Y").capitalize()
+ts  = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-# Cargar datos
-if not os.path.exists(json_path):
-    print(f"[HTML] JSON no encontrado: {json_path}")
-    exit(1)
+tabs = ""; panes = ""
 
-with open(json_path, encoding="utf-8") as fh:
-    datos = json.load(fh)
-
-fecha_dt  = datetime.strptime(FECHA_EVAL, "%Y-%m-%d")
-fecha_fmt = fecha_dt.strftime("%d de %B de %Y").capitalize()
-ts_gen    = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-# ── Construir HTML ────────────────────────────────────────────────────────────
-def tabs_contaminante():
-    tabs = ""
-    panes = ""
-    for i, cont in enumerate(["o3","PM10","PM25"]):
-        activo = "active" if i == 0 else ""
-        tabs  += f'<button class="tab-btn {activo}" onclick="mostrarTab(\'{cont}\')" id="tab-{cont}">{CONT_LABEL[cont]}</button>\n'
-        panes += f'<div class="tab-pane {activo}" id="pane-{cont}">\n'
-        panes += f'  <div class="ciudad-grid">\n'
-
-        for ciudad in CIUDADES:
-            info_ciudad = datos.get(cont, {}).get(ciudad, {})
-            val_hoy = info_ciudad.get("valor_hoy", {})
-            stats   = info_ciudad.get("stats_30d", {})
-            n_hist  = info_ciudad.get("n_historico", 0)
-            icono   = ICONOS.get(ciudad,"📍")
-
-            # Tabla de valores del día
-            filas_valores = ""
-            for h_key, h_lbl in H_LABEL.items():
-                v_mod = val_hoy.get(h_key)
-                v_obs = val_hoy.get("max_obs")
-                dif   = (v_mod - v_obs) if (v_mod is not None and v_obs is not None) else None
-                chip  = H_CHIP_CSS[h_key]
-                filas_valores += (
-                    f"<tr>"
-                    f"<td><span class='chip {chip}'>{h_lbl}</span></td>"
-                    f"<td>{fmt(v_obs)}</td>"
-                    f"<td>{fmt(v_mod)}</td>"
-                    f"<td>{fmt(dif, dec=1)}</td>"
-                    f"</tr>\n"
-                )
-
-            # Tabla de métricas últimos 30 días
-            filas_metricas = ""
-            for h_key, h_lbl in H_LABEL.items():
-                st = stats.get(h_key, {}).get("continuas", {})
-                bias = st.get("bias"); r = st.get("r"); rmse = st.get("rmse")
-                s_bias = semaforo_bias(bias); s_r = semaforo_r(r)
-                filas_metricas += (
-                    f"<tr>"
-                    f"<td><span class='chip {H_CHIP_CSS[h_key]}'>{h_lbl}</span></td>"
-                    f"<td><span class='semaforo {s_bias}'></span>{fmt(bias)}</td>"
-                    f"<td>{fmt(rmse)}</td>"
-                    f"<td><span class='semaforo {s_r}'></span>{fmt(r,2)}</td>"
-                    f"</tr>\n"
-                )
-
-            # Métricas dicotómicas
-            filas_dico = ""
-            for h_key, h_lbl in H_LABEL.items():
-                sd = stats.get(h_key, {}).get("dicotomicas", {})
-                pod = sd.get("POD"); far = sd.get("FAR"); csi = sd.get("CSI")
-                filas_dico += (
-                    f"<tr>"
-                    f"<td><span class='chip {H_CHIP_CSS[h_key]}'>{h_lbl}</span></td>"
-                    f"<td>{fmt(pod,3) if pod is not None else '—'}</td>"
-                    f"<td>{fmt(far,3) if far is not None else '—'}</td>"
-                    f"<td>{fmt(csi,3) if csi is not None else '—'}</td>"
-                    f"</tr>\n"
-                )
-
-            panes += f"""
-    <div class="ciudad-card">
-      <div class="card-header">{icono} {ciudad}</div>
-      <div class="card-body">
-        <table class="tabla-dia">
-          <thead><tr>
-            <th>Horizonte</th><th>Obs ({CONT_LABEL[cont].split("(")[1].rstrip(")")})</th>
-            <th>Modelo</th><th>Diferencia</th>
-          </tr></thead>
-          <tbody>{filas_valores}</tbody>
+for i, cont in enumerate(["o3","PM10","PM25"]):
+    act = "active" if i==0 else ""
+    tabs += (f'<button class="tab-btn {act}" onclick="mTab(\'{cont}\')" '
+             f'id="tab-{cont}">{CLB[cont]}</button>\n')
+    panes += f'<div class="tab-pane {act}" id="pane-{cont}">\n<div class="cgrid">\n'
+    for ciudad in CIUDADES:
+        ic  = datos.get(cont,{}).get(ciudad,{})
+        vh  = ic.get("valor_hoy",{})
+        st  = ic.get("stats_30d",{})
+        nh  = ic.get("n_historico",0)
+        un  = CLB[cont].split("(")[1].rstrip(")")
+        # tabla de valores del día
+        rv = ""
+        for hk,hl in HLB.items():
+            vm = vh.get(hk); vo = vh.get("max_obs")
+            df_ = (vm-vo) if (vm is not None and vo is not None) else None
+            rv += (f"<tr><td><span class='chip {HCP[hk]}'>{hl}</span></td>"
+                   f"<td>{f_(vo)}</td><td>{f_(vm)}</td><td>{f_(df_)}</td></tr>\n")
+        # métricas continuas y dicotómicas
+        rm = ""; rd = ""
+        for hk,hl in HLB.items():
+            sc = st.get(hk,{}).get("continuas",{})
+            sd = st.get(hk,{}).get("dicotomicas",{})
+            b=sc.get("bias"); r=sc.get("r"); rmse=sc.get("rmse")
+            rm += (f"<tr><td><span class='chip {HCP[hk]}'>{hl}</span></td>"
+                   f"<td><span class='sem {sb_(b)}'></span>{f_(b)}</td>"
+                   f"<td>{f_(rmse)}</td>"
+                   f"<td><span class='sem {sr_(r)}'></span>{f_(r,2)}</td></tr>\n")
+            pod=sd.get("POD"); far=sd.get("FAR"); csi=sd.get("CSI")
+            rd += (f"<tr><td><span class='chip {HCP[hk]}'>{hl}</span></td>"
+                   f"<td>{f_(pod,3) if pod is not None else '—'}</td>"
+                   f"<td>{f_(far,3) if far is not None else '—'}</td>"
+                   f"<td>{f_(csi,3) if csi is not None else '—'}</td></tr>\n")
+        panes += f"""  <div class="card">
+    <div class="ch">{ICONOS.get(ciudad,'📍')} {ciudad}</div>
+    <div class="cb">
+      <table class="td">
+        <thead><tr><th>Horizonte</th><th>Obs ({un})</th><th>Modelo</th><th>Dif.</th></tr></thead>
+        <tbody>{rv}</tbody>
+      </table>
+      <button class="st-btn" onclick="tSt(this)">📊 Métricas {VENTANA} días (n={nh})</button>
+      <div class="st-det">
+        <p style="font-size:.8rem;color:#666;margin:.5rem 0 .3rem">Continuas:</p>
+        <table class="tm">
+          <thead><tr><th>Horizonte</th><th>BIAS</th><th>RMSE</th><th>R</th></tr></thead>
+          <tbody>{rm}</tbody>
         </table>
-        <div class="stats-section">
-          <button class="stats-toggle" onclick="toggleStats(this)">
-            📊 Métricas últimos 30 días (n={n_hist})
-          </button>
-          <div class="stats-detail">
-            <p style="font-size:.8rem;color:#666;margin:.5rem 0 .3rem">Métricas continuas:</p>
-            <table class="tabla-metricas">
-              <thead><tr><th>Horizonte</th><th>BIAS</th><th>RMSE</th><th>R</th></tr></thead>
-              <tbody>{filas_metricas}</tbody>
-            </table>
-            <p style="font-size:.8rem;color:#666;margin:.5rem 0 .3rem">
-              Métricas dicotómicas (umbral {UMBRAL[cont]}):
-            </p>
-            <table class="tabla-metricas">
-              <thead><tr><th>Horizonte</th><th>POD</th><th>FAR</th><th>CSI</th></tr></thead>
-              <tbody>{filas_dico}</tbody>
-            </table>
-          </div>
-        </div>
+        <p style="font-size:.8rem;color:#666;margin:.5rem 0 .3rem">
+          Dicotómicas (umbral {UMBRAL[cont]}):
+        </p>
+        <table class="tm">
+          <thead><tr><th>Horizonte</th><th>POD</th><th>FAR</th><th>CSI</th></tr></thead>
+          <tbody>{rd}</tbody>
+        </table>
       </div>
     </div>
+  </div>
 """
-        panes += "  </div>\n</div>\n"
-    return tabs, panes
-
-
-tabs_str, panes_str = tabs_contaminante()
+    panes += "</div>\n</div>\n"
 
 html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Evaluación WRF-Chem — {fecha_fmt}</title>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Evaluación WRF-Chem — {flt}</title>
   <link rel="stylesheet" href="../../css/estilo.css">
 </head>
 <body>
-
 <header>
   <div class="logo">🌫️</div>
   <div>
     <h1>Evaluación del Pronóstico de Calidad del Aire</h1>
-    <p>Modelo WRF-Chem vs Observaciones SINAICA &nbsp;|&nbsp; Fecha de evaluación: <strong>{fecha_fmt}</strong></p>
+    <p>WRF-Chem vs SINAICA &nbsp;|&nbsp; <strong>{flt}</strong></p>
   </div>
 </header>
-
-<main style="max-width:1400px; margin:0 auto; padding:.5rem 1rem 2rem;">
-
-  <!-- KPIs de resumen -->
+<main style="max-width:1400px;margin:0 auto;padding:.5rem 1rem 2rem;">
   <section style="margin-top:1.2rem;">
-    <h2 style="font-size:1.1rem; color:var(--azul); margin-bottom:.7rem;">
-      📋 Resumen del día
-    </h2>
-    <div class="kpi-grid">
-      <div class="kpi">
-        <div class="kpi-val">3</div>
-        <div class="kpi-lbl">Horizontes evaluados<br>(+24h, +48h, +72h)</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-val">7</div>
-        <div class="kpi-lbl">Ciudades analizadas</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-val">3</div>
-        <div class="kpi-lbl">Contaminantes<br>(O₃, PM10, PM2.5)</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-val">30d</div>
-        <div class="kpi-lbl">Ventana de métricas<br>estadísticas</div>
-      </div>
+    <h2 style="font-size:1.1rem;color:var(--az);margin-bottom:.7rem;">📋 Resumen</h2>
+    <div class="kgrid">
+      <div class="kpi"><div class="kv">3</div><div class="kl">Horizontes</div></div>
+      <div class="kpi"><div class="kv">7</div><div class="kl">Ciudades</div></div>
+      <div class="kpi"><div class="kv">3</div><div class="kl">Contaminantes</div></div>
+      <div class="kpi"><div class="kv">{VENTANA}d</div><div class="kl">Ventana métricas</div></div>
     </div>
-    <p style="font-size:.82rem; color:#666; margin-top:.5rem;">
-      <span class="semaforo verde"></span> BIAS &lt; 10 &nbsp;
-      <span class="semaforo ambar"></span> BIAS 10–25 &nbsp;
-      <span class="semaforo rojo"></span>  BIAS &gt; 25 &nbsp;&nbsp;|&nbsp;&nbsp;
-      <span class="semaforo verde"></span> R ≥ 0.7 &nbsp;
-      <span class="semaforo ambar"></span> R 0.4–0.7 &nbsp;
-      <span class="semaforo rojo"></span>  R &lt; 0.4
+    <p style="font-size:.82rem;color:#666;margin-top:.5rem;">
+      <span class="sem vd"></span>BIAS&lt;10 &nbsp;
+      <span class="sem am"></span>BIAS 10–25 &nbsp;
+      <span class="sem rj"></span>BIAS&gt;25 &nbsp;|&nbsp;
+      <span class="sem vd"></span>R≥0.7 &nbsp;
+      <span class="sem am"></span>R 0.4–0.7 &nbsp;
+      <span class="sem rj"></span>R&lt;0.4
     </p>
   </section>
-
-  <!-- Pestañas por contaminante -->
   <section style="margin-top:1.5rem;">
-    <h2 style="font-size:1.1rem; color:var(--azul); margin-bottom:.7rem;">
-      🔬 Resultados por contaminante y ciudad
-    </h2>
-    <div class="tabs">
-      {tabs_str}
-    </div>
-    {panes_str}
+    <h2 style="font-size:1.1rem;color:var(--az);margin-bottom:.7rem;">🔬 Resultados</h2>
+    <div class="tabs">{tabs}</div>
+    {panes}
   </section>
-
-  <!-- Navegación -->
-  <section style="margin-top:2rem; padding-top:1rem; border-top:1px solid var(--gris-brd);">
+  <section style="margin-top:2rem;padding-top:1rem;border-top:1px solid var(--brd);">
     <a href="../../index.html">← Índice histórico</a>
   </section>
-
 </main>
-
-<footer>
-  Generado automáticamente el {ts_gen} &nbsp;|&nbsp;
-  Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
-</footer>
-
+<footer>Generado el {ts} &nbsp;|&nbsp; Pipeline WRF-Chem / Calidad del Aire — Centro de México</footer>
 <script>
-function mostrarTab(cont) {{
-    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('pane-' + cont).classList.add('active');
-    document.getElementById('tab-'  + cont).classList.add('active');
+function mTab(c){{
+  document.querySelectorAll('.tab-pane,.tab-btn').forEach(e=>e.classList.remove('active'));
+  document.getElementById('pane-'+c).classList.add('active');
+  document.getElementById('tab-'+c).classList.add('active');
 }}
-function toggleStats(btn) {{
-    const det = btn.nextElementSibling;
-    det.classList.toggle('open');
-    btn.textContent = det.classList.contains('open')
-        ? btn.textContent.replace('📊','📉')
-        : btn.textContent.replace('📉','📊');
+function tSt(b){{
+  const d=b.nextElementSibling; d.classList.toggle('open');
+  b.textContent=d.classList.contains('open')
+    ?b.textContent.replace('📊','📉'):b.textContent.replace('📉','📊');
 }}
 </script>
 </body>
 </html>"""
 
 os.makedirs(os.path.dirname(html_out), exist_ok=True)
-with open(html_out, "w", encoding="utf-8") as fh:
+with open(html_out,"w",encoding="utf-8") as fh:
     fh.write(html)
-print(f"[HTML] Página generada: {html_out}")
+print(f"[HTML] Generado: {html_out}")
 PYEOF
 
-if ${PYTHON} "${DIR_TMP}/generar_html.py"; then
-    HTML_HOY="${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}/evaluacion_${FECHA_EVAL}.html"
-    ok "  HTML generado: ${HTML_HOY}"
+if "${PYTHON}" "${DIR_TMP}/generar_html.py" >> "${LOG_FILE}" 2>&1; then
+    ok "  HTML: ${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}/evaluacion_${FECHA_EVAL}.html"
 else
-    warn "  Error generando HTML del día."
+    warn "  Error generando HTML — ver ${LOG_FILE}"
 fi
 
 # =============================================================================
-# ── SECCIÓN 11: ACTUALIZAR ÍNDICE HISTÓRICO ───────────────────────────────────
+# ── SECCIÓN 12: ACTUALIZAR ÍNDICE HISTÓRICO ───────────────────────────────────
 # =============================================================================
 
-info "── Etapa 8: Actualizando índice histórico ──"
+step "Etapa 9 — Actualización del índice histórico"
 
 cat > "${DIR_TMP}/actualizar_indice.py" << PYEOF
 #!/usr/bin/env python3
-"""Actualiza index.html con enlace al reporte del día recién generado."""
+"""Actualiza web/index.html con todos los reportes disponibles."""
 import os, glob
 from datetime import datetime
 
-DIR_WEB    = "${DIR_WEB}"
-FECHA_EVAL = "${FECHA_EVAL}"
-
-# Recopilar todos los reportes existentes ordenados (más reciente primero)
-patron   = os.path.join(DIR_WEB, "????", "??", "evaluacion_????-??-??.html")
-reportes = sorted(glob.glob(patron), reverse=True)
-
-def ruta_relativa(ruta_abs):
-    return os.path.relpath(ruta_abs, DIR_WEB)
+DIR_WEB = "${DIR_WEB}"
+reportes = sorted(
+    glob.glob(os.path.join(DIR_WEB,"????","??","evaluacion_????-??-??.html")),
+    reverse=True)
 
 filas = ""
-for ruta in reportes:
-    nombre = os.path.basename(ruta).replace("evaluacion_","").replace(".html","")
+for r in reportes:
+    n = os.path.basename(r).replace("evaluacion_","").replace(".html","")
     try:
-        dt = datetime.strptime(nombre, "%Y-%m-%d")
-        fecha_legible = dt.strftime("%d de %B de %Y").capitalize()
+        fl = datetime.strptime(n,"%Y-%m-%d").strftime("%d de %B de %Y").capitalize()
     except ValueError:
-        fecha_legible = nombre
-    rel = ruta_relativa(ruta)
-    filas += f'  <tr><td><a href="{rel}">{fecha_legible}</a></td><td>{nombre}</td></tr>\n'
+        fl = n
+    filas += f'  <tr><td><a href="{os.path.relpath(r,DIR_WEB)}">{fl}</a></td><td>{n}</td></tr>\n'
 
-ts_gen = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-html_idx = f"""<!DOCTYPE html>
+ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Evaluación WRF-Chem — Índice histórico</title>
   <link rel="stylesheet" href="css/estilo.css">
 </head>
@@ -1128,64 +1315,69 @@ html_idx = f"""<!DOCTYPE html>
   <div class="logo">🌫️</div>
   <div>
     <h1>Evaluación del Pronóstico de Calidad del Aire</h1>
-    <p>Índice histórico de reportes diarios &nbsp;|&nbsp; WRF-Chem vs SINAICA</p>
+    <p>Índice histórico &nbsp;|&nbsp; WRF-Chem vs SINAICA</p>
   </div>
 </header>
 <main style="max-width:900px;margin:2rem auto;padding:0 1rem 3rem;">
-  <h2 style="font-size:1.1rem;color:var(--azul);margin-bottom:1rem;">
+  <h2 style="font-size:1.1rem;color:var(--az);margin-bottom:1rem;">
     📅 Reportes disponibles ({len(reportes)} días)
   </h2>
-  <table style="width:100%;border-collapse:collapse;background:white;
-                border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
+  <table style="width:100%;border-collapse:collapse;background:#fff;border-radius:10px;
+                overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
     <thead>
-      <tr style="background:var(--azul);color:white;">
-        <th style="padding:.7rem 1rem;text-align:left;">Fecha</th>
-        <th style="padding:.7rem 1rem;text-align:left;">Identificador</th>
+      <tr style="background:var(--az);color:#fff;">
+        <th style="padding:.7rem 1rem;text-align:left">Fecha</th>
+        <th style="padding:.7rem 1rem;text-align:left">Identificador</th>
       </tr>
     </thead>
-    <tbody>
-{filas}
-    </tbody>
+    <tbody>{filas}</tbody>
   </table>
 </main>
-<footer>Actualizado el {ts_gen}</footer>
+<footer>Actualizado el {ts}</footer>
 <script>
-/* Alternado de filas */
-document.querySelectorAll('tbody tr:nth-child(even)')
-    .forEach(r => r.style.background='#f4f6f9');
+document.querySelectorAll('tbody tr:nth-child(even)').forEach(r=>r.style.background='#f4f6f9');
 </script>
 </body>
 </html>"""
 
-idx_out = os.path.join(DIR_WEB, "index.html")
-with open(idx_out, "w", encoding="utf-8") as fh:
-    fh.write(html_idx)
-print(f"[IDX] Índice actualizado: {idx_out} ({len(reportes)} reportes)")
+idx = os.path.join(DIR_WEB,"index.html")
+with open(idx,"w",encoding="utf-8") as fh:
+    fh.write(html)
+print(f"[IDX] {idx}  ({len(reportes)} reportes)")
 PYEOF
 
-if ${PYTHON} "${DIR_TMP}/actualizar_indice.py"; then
-    ok "  Índice histórico actualizado: ${DIR_WEB}/index.html"
+if "${PYTHON}" "${DIR_TMP}/actualizar_indice.py" >> "${LOG_FILE}" 2>&1; then
+    ok "  Índice: ${DIR_WEB}/index.html"
 else
-    warn "  Error actualizando el índice."
+    warn "  Error actualizando índice — ver ${LOG_FILE}"
 fi
 
 # =============================================================================
-# ── SECCIÓN 12: LIMPIEZA Y RESUMEN FINAL ─────────────────────────────────────
+# ── SECCIÓN 13: LIMPIEZA Y RESUMEN FINAL ─────────────────────────────────────
 # =============================================================================
 
-info "── Limpieza de archivos temporales ──"
-rm -rf "${DIR_TMP:?}"/*.tmp "${DIR_TMP}"/*.py 2>/dev/null || true
-ok "  Temporales eliminados."
+step "Limpieza y resumen"
 
-# Calcular duración total
-DURACION=$(( $(date +%s) - $(date -d "${FECHA_EVAL}" +%s 2>/dev/null || date +%s) ))
+find "${DIR_TMP}" -maxdepth 1 \( -name "*.py" -o -name "*.tmp" \) \
+    -delete 2>/dev/null || true
+ok "  Archivos Python temporales eliminados."
 
-info "============================================================"
-info " EJECUCIÓN COMPLETADA"
-info " Fecha evaluada  : ${FECHA_EVAL}"
-info " HTML generado   : ${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}/evaluacion_${FECHA_EVAL}.html"
-info " Índice web      : ${DIR_WEB}/index.html"
-info " Log de sesión   : ${LOG_FILE}"
-info "============================================================"
+TS_FIN=$(date +%s)
+DURACION=$(( TS_FIN - TS_INICIO ))
+DUR_FMT="$(( DURACION / 60 ))m $(( DURACION % 60 ))s"
+
+{
+printf '%s\n' \
+  "============================================================" \
+  " EJECUCIÓN COMPLETADA  v2.0.0" \
+  " Fecha evaluada  : ${FECHA_EVAL}" \
+  " WRF disponibles : ${n_wrfout}/3" \
+  " Descarga SINAICA: OK=${n_ok} FALLO=${n_fallo} OMITIDO=${n_omitido}" \
+  " HTML             : ${DIR_WEB}/${ANIO_EVAL}/${MES_EVAL}/evaluacion_${FECHA_EVAL}.html" \
+  " Índice           : ${DIR_WEB}/index.html" \
+  " Duración         : ${DUR_FMT}" \
+  " Log              : ${LOG_FILE}" \
+  "============================================================"
+} | tee -a "${LOG_FILE}"
 
 exit 0

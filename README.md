@@ -1,93 +1,170 @@
-# 🌬️ Sistema de Descarga de Datos de Calidad del Aire — SINAICA
+# 🌫️ ddsinaica — Pipeline de Evaluación WRF-Chem vs SINAICA
 
-Herramienta Python para la descarga automatizada de datos horarios de calidad del aire desde el portal [SINAICA](https://sinaica.inecc.gob.mx) del INECC, integrando el paquete R [`rsinaica`](https://github.com/diegovalle/rsinaica).
+[![bash](https://img.shields.io/badge/bash-≥4.0-blue?logo=gnu-bash)](#)
+[![python](https://img.shields.io/badge/python-≥3.8-blue?logo=python)](#)
+[![license](https://img.shields.io/badge/license-MIT-green)](#licencia)
+
+Pipeline operativo de descarga, procesamiento y validación estadística del pronóstico de calidad del aire producido por **WRF-Chem**, comparado contra observaciones horarias de la red **SINAICA/INECC**. Cubre siete ciudades del centro de México y está diseñado para ejecutarse de forma autónoma mediante crontab, publicando resultados en una página web estática actualizada cada día.
 
 ---
 
-## 📋 Tabla de Contenidos
+## Tabla de Contenidos
 
-- [Descripción General](#descripción-general)
-- [Arquitectura del Sistema](#arquitectura-del-sistema)
-- [Requisitos](#requisitos)
+- [Descripción](#descripción)
+- [Arquitectura del flujo](#arquitectura-del-flujo)
+- [Requisitos del sistema](#requisitos-del-sistema)
+- [Dependencias](#dependencias)
 - [Instalación](#instalación)
 - [Configuración](#configuración)
 - [Uso](#uso)
-- [Descripción de Funciones](#descripción-de-funciones)
-- [Flujo de Ejecución](#flujo-de-ejecución)
-- [Estructura de Archivos de Salida](#estructura-de-archivos-de-salida)
-- [Correcciones Aplicadas](#correcciones-aplicadas)
-- [Notas Técnicas](#notas-técnicas)
-- [Fuentes de Datos](#fuentes-de-datos)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Flujo de datos](#flujo-de-datos)
+- [Manejo de errores](#manejo-de-errores)
+- [Ciudades y contaminantes](#ciudades-y-contaminantes)
+- [Métricas de validación](#métricas-de-validación)
+- [Contribución](#contribución)
+- [Licencia](#licencia)
 
 ---
 
-## Descripción General
+## Descripción
 
-Este script automatiza la consulta y descarga de datos de calidad del aire para **5 redes de monitoreo** del Sistema Nacional de Información de la Calidad del Aire (SINAICA), cubriendo **15 estaciones** en los estados de México, Puebla, Tlaxcala, Hidalgo y Morelos.
+El repositorio implementa dos modos de operación:
 
-La descarga se realiza **mes a mes** para respetar el límite de rango por consulta de la API interna del portal. Cada petición mensual se ejecuta a través de un script R temporal que invoca `sinaica_station_data()` del paquete `rsinaica`; el resultado se persiste como CSV temporal, se carga a Python para su procesamiento y el archivo temporal se elimina.
+| Modo | Script principal | Propósito |
+|------|-----------------|-----------|
+| **Operativo diario** | `evaluacion_diaria.sh` | Ejecutado por crontab; descarga, procesa y publica el análisis del día anterior en HTML. |
+| **Histórico mensual** | `01_extrae.py` | Procesamiento manual de un mes completo; genera reportes Word con Bootstrap. |
 
-```
-Python (orquestación)
-       │
-       ▼
- temp_script.R  ──►  Rscript  ──►  SINAICA / INECC
-                         │
-                         ▼
-                   temp_data.csv
-                         │
-                         ▼
-               pandas (procesamiento)
-                         │
-                         ▼
-        calidad_aire_<Red>_<Estacion>.csv / .json
-```
+Desde la **v2.0.0**, la descarga de observaciones se realiza íntegramente con `sinaica_descarga.sh` (HTTP directo al endpoint de SINAICA), eliminando la dependencia de R y el paquete `rsinaica`.
 
 ---
 
-## Arquitectura del Sistema
+## Arquitectura del flujo
 
 ```
-sinaica_descarga_redes.py
-│
-├── CONFIGURACION_REDES        ← Catálogo de redes y estaciones
-├── PARAMETROS                 ← Contaminantes a descargar
-├── FECHA_INICIO / FECHA_FIN   ← Ventana temporal de consulta
-│
-├── download_data_r()
-│   ├── Genera  → temp_script.R   (solo código R, nunca Python)
-│   ├── Ejecuta → Rscript temp_script.R
-│   ├── Lee     → temp_data.csv   (si R encontró datos)
-│   └── Elimina → temp_data.csv + temp_script.R  (always/finally)
-│
-└── process_and_save()
-    ├── Itera: redes → estaciones → meses → parámetros
-    ├── Llama download_data_r() por cada combinación
-    ├── Aplica promedio diario 24 h a PM10 y PM2.5
-    └── Consolida y guarda un archivo por estación
+╔══════════════════════════════════════════════════════════════════╗
+║  OBSERVACIONES (SINAICA/INECC)                                   ║
+║                                                                  ║
+║  sinaica_descarga.sh                                             ║
+║  POST https://sinaica.inecc.gob.mx/pags/datGrafs.php            ║
+║  ┌─ por estación × contaminante × día ─┐                        ║
+║  │  tmp/raw_sinaica/<fecha>/*.csv       │                        ║
+║  └───────────────┬───────────────────  ┘                        ║
+║                  ▼                                               ║
+║  [Normalización al formato del pipeline]                         ║
+║                  ▼                                               ║
+║  calidad_aire_pipeline.sh                                        ║
+║  ├─ salida/<Ciudad>_<Estacion>_<Cont>.csv                        ║
+║  └─ consolidado/<Ciudad>_<Cont>_consolidado.csv                  ║
+║                  │                                               ║
+║                  └───────────► observado/  ◄──────────────────┐ ║
+╚══════════════════════════════════════════════════════════════╗  │ ║
+                                                               ║  │ ║
+╔══════════════════════════════════════════════════════════════╝  │ ║
+║  MODELO (WRF-Chem / LUSTRE)                                      │ ║
+║                                                                  │ ║
+║  wrfout_d01_YYYY-MM-DD_00:00:00 × 3 horizontes                   │ ║
+║              │                                                   │ ║
+╚══════════════╪═══════════════════════════════════════════════════╪═╝
+               │                                                   │
+               ▼                                                   │
+  extract_dia.py  ─────────────────────────────────────────────────┘
+  (O3 max espacial ppbv; PM10/PM2.5 prom. máx. µg/m³)
+               │
+               ▼
+  combinar_dia.py
+  (obs_max + mod_dia1/dia2/dia3 por ciudad)
+               │
+               ▼
+  stats_dia.py  →  stats_YYYY-MM-DD.json
+  (BIAS, RMSE, R; POD, FAR, CSI — ventana 30 días)
+               │
+       ┌───────┴──────────────┐
+       ▼                      ▼
+  generar_html.py        actualizar_indice.py
+  web/YYYY/MM/           web/index.html
+  evaluacion_YYYY-MM-DD.html
 ```
+
+### Horizontes de pronóstico evaluados
+
+Dado que cada run de WRF-Chem produce 72 h de pronóstico, el día de evaluación (`FECHA_EVAL = ayer`) está cubierto por tres runs distintos:
+
+| Variable | Fecha del run | Horizonte | Ventana temporal local |
+|----------|--------------|-----------|------------------------|
+| `RUN_D1` | Ayer | +24 h (día 1) | Índices 6–29 del wrfout |
+| `RUN_D2` | Antier | +48 h (día 2) | Índices 30–53 del wrfout |
+| `RUN_D3` | Antes de ayer | +72 h (día 3) | Índices 54–71 del wrfout |
 
 ---
 
-## Requisitos
+## Requisitos del sistema
 
-### Python ≥ 3.8
+| Componente | Versión mínima | Notas |
+|------------|---------------|-------|
+| bash | 4.0 | Arrays asociativos (`declare -A`) |
+| curl | 7.x | Peticiones HTTP a SINAICA |
+| python3 | 3.8 | Scripts de análisis y visualización |
+| awk, sort, sed | POSIX | Procesamiento de CSV en bash |
 
-| Librería | Versión mínima | Uso |
-|---|---|---|
-| `pandas` | ≥ 1.3 | Manipulación y consolidación de DataFrames |
-| `python-dateutil` | ≥ 2.8 | Incremento mensual con `relativedelta` |
-| `subprocess` | Estándar | Ejecución de `Rscript` como subproceso |
-| `os` | Estándar | Gestión de archivos temporales |
-| `datetime` | Estándar | Manejo de fechas del periodo de descarga |
+> **macOS**: bash instalado por defecto es la v3. Instalar `bash >= 4` con Homebrew:
+> ```bash
+> brew install bash
+> ```
+> Luego apuntar el crontab a `/usr/local/bin/bash`.
 
-### R
+---
 
-| Paquete | Uso |
-|---|---|
-| `rsinaica` | Acceso a la API del portal SINAICA |
+## Dependencias
 
-> `Rscript` debe estar disponible en el `PATH` del sistema.
+### Python
+
+```bash
+pip install -r requirements.txt
+```
+
+**`requirements.txt`**:
+
+```
+xarray>=0.19
+netCDF4>=1.5
+pandas>=1.3
+numpy>=1.21
+matplotlib>=3.4
+python-docx>=0.8
+python-dateutil>=2.8
+```
+
+### Entorno reproducible (recomendado)
+
+**Con venv**:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Configurar `PYTHON_BIN` en el entorno del crontab para apuntar al Python del venv:
+
+```
+# crontab -e
+PYTHON_BIN=/opt/wrf/evaluacion/.venv/bin/python3
+0 7 * * * /opt/wrf/evaluacion/evaluacion_diaria.sh >> ...
+```
+
+**Con conda**:
+
+```bash
+conda create -n wrf-eval python=3.11
+conda activate wrf-eval
+pip install -r requirements.txt
+```
+
+### Sin R (cambio respecto a v1.x)
+
+A partir de la v2.0.0 **no se requiere R ni el paquete `rsinaica`**. La descarga se realiza directamente sobre el endpoint HTTP de SINAICA mediante `sinaica_descarga.sh`.
 
 ---
 
@@ -98,293 +175,331 @@ sinaica_descarga_redes.py
 git clone https://github.com/JoseAgustin/ddsinaica.git
 cd ddsinaica
 
-# 2. Instalar dependencias Python
-pip install pandas python-dateutil
+# 2. Crear y activar entorno Python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-# 3. Instalar el paquete R (desde consola R o RStudio)
-# install.packages("rsinaica" )
+# 3. Crear árbol de directorios de trabajo
+#    (evaluacion_diaria.sh lo hace automáticamente en la primera ejecución,
+#     pero se puede hacer manualmente para verificar permisos)
+mkdir -p conf observado modelo combinado/ajustados logs tmp web/css
+
+# 4. Dar permisos de ejecución a los scripts bash
+chmod +x evaluacion_diaria.sh sinaica_descarga.sh calidad_aire_pipeline.sh
+
+# 5. Editar las variables de configuración en la Sección 1 del script
+#    Las dos variables obligatorias son:
+#      DIR_PROYECTO   →  ruta absoluta del repositorio clonado
+#      DIR_WRF        →  ruta del almacenamiento LUSTRE de salidas WRF-Chem
+#    O bien exportarlas como variables de entorno:
+export EVALUACION_DIR=/opt/wrf/evaluacion
+export WRF_DIR=/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM
 ```
 
 ---
 
 ## Configuración
 
-Toda la configuración se realiza editando las **variables globales** en la cabecera del archivo.
+### Variables de entorno
 
-### Redes y Estaciones
+| Variable | Descripción | Valor por defecto |
+|----------|-------------|-------------------|
+| `EVALUACION_DIR` | Ruta absoluta del proyecto | Directorio del script |
+| `WRF_DIR` | Raíz de archivos wrfout de WRF-Chem | `/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM` |
+| `PYTHON_BIN` | Ejecutable Python | `python3` |
+| `SINAICA_TIPO` | Tipo de datos SINAICA | `""` (Crude/no validados) |
 
-```python
-CONFIGURACION_REDES = [
-    {"red": "Toluca",     "estaciones": ["Toluca Centro", "Ceboruco",
-                                         "Almoloya de Juárez", "Oxtotitlán", "Metepec"]},
-    {"red": "Puebla",     "estaciones": ["Atlixco", "Las Ninfas", "Tehuacán",
-                                         "San Martín Texmelucan",
-                                         "Universidad Tecnológica de Puebla"]},
-    {"red": "Tlaxcala",   "estaciones": ["Palacio de Gobierno", "Apizaco"]},
-    {"red": "Pachuca",    "estaciones": ["Instituto Tecnológico de Pachuca",
-                                         "Primaria Ignacio Zaragoza"]},
-    {"red": "Cuernavaca", "estaciones": ["Cuernavaca 01"]}
-]
+### Catálogo de estaciones (`conf/estaciones.conf`)
+
+El script genera una plantilla en la primera ejecución. Editar con los IDs reales de cada estación:
+
+```tsv
+# ESTACION_ID  CIUDAD_WRF  CONT_SINAICA  NOMBRE_RED           NOMBRE_ESTACION
+249            CDMX        O3            Valle de México       Merced
+250            CDMX        PM10          Valle de México       Merced
+501            Pachuca     O3            Pachuca               Primaria Ignacio Zaragoza
 ```
 
-| Red | Estaciones | Estado |
-|---|---|---|
-| Toluca | 5 | Estado de México |
-| Puebla | 5 | Puebla |
-| Tlaxcala | 2 | Tlaxcala |
-| Pachuca | 2 | Hidalgo |
-| Cuernavaca | 1 | Morelos |
+Los IDs numéricos de estación se obtienen en **https://sinaica.inecc.gob.mx** → Datos → buscar estación → el ID aparece en la URL (`estacionId=XXX`).
 
-> Los nombres deben coincidir **exactamente** con el catálogo `stations_sinaica` del paquete R.
-
-### Parámetros Calidad del Aire
-
-```python
-PARAMETROS = ["PM10", "PM2.5", "O3"]
-```
-
-| Código | Contaminante | Resolución de salida | Unidades | Norma |
-|---|---|---|---|---|
-| `PM10` | Partículas ≤ 10 µm | Promedio diario 24 h | µg/m³ | NOM-025-SSA1-2021 |
-| `PM2.5` | Partículas ≤ 2.5 µm | Promedio diario 24 h | µg/m³ | NOM-025-SSA1-2021 |
-| `O3` | Ozono | Horaria | ppm | NOM-020-SSA1-2021 |
-
-### Periodo y Formato de Salida
-
-```python
-FECHA_INICIO   = datetime(2025, 4, 1)  # Inicio fijo que se puede actualizar
-FECHA_FIN      = datetime.now()         # Fin dinámico: fecha actual
-FORMATO_SALIDA = "csv"                  # Alternativa: "json"
-```
+> **Nota**: Las líneas con `ID=999` son ejemplos de plantilla y se omiten automáticamente durante la descarga.
 
 ---
 
 ## Uso
 
+### Modo automático (crontab)
+
 ```bash
-python baja_CAMe.py
+# Evalúa el día anterior. Sin argumentos.
+bash evaluacion_diaria.sh
 ```
 
-**Ejemplo de salida en consola:**
+**Instalación en crontab** (ejecutar a las 07:00 cada día):
 
-```
-[Toluca] Consultando PM10 para Toluca Centro (2025-04-01 → 2025-05-01)...
-[Toluca] Consultando PM2.5 para Toluca Centro (2025-04-01 → 2025-05-01)...
-[Toluca] Consultando O3 para Toluca Centro (2025-04-01 → 2025-05-01)...
-
-[Toluca] Consultando O3 para Toluca Centro (2026-02-01 → 2026-02-21)...
-  → Archivo generado: calidad_aire_Toluca_Toluca_Centro.csv (8119 registros)
-
-[Tlaxcala] Consultando PM2.5 para Apizaco (2026-02-01 → 2026-02-21)...
-[Tlaxcala] Consultando O3 para Apizaco (2026-02-01 → 2026-02-21)...
-  ⚠ Sin datos para Apizaco en la red Tlaxcala.
-
-[Cuernavaca] Consultando PM2.5 para Cuernavaca 01 (2026-02-01 → 2026-02-21)...
-[Cuernavaca] Consultando O3 para Cuernavaca 01 (2026-02-01 → 2026-02-21)...
-  → Archivo generado: calidad_aire_Cuernavaca_Cuernavaca_01.csv (18170 registros)
+```bash
+crontab -e
 ```
 
----
+```cron
+# Variables de entorno para el pipeline
+EVALUACION_DIR=/opt/wrf/evaluacion
+WRF_DIR=/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM
+PYTHON_BIN=/opt/wrf/evaluacion/.venv/bin/python3
 
-## Descripción de Funciones
-
-### `download_data_r()`
-
-```python
-def download_data_r(
-    network_name: str,
-    station_name: str,
-    parameter:    str,
-    start_date:   str,
-    end_date:     str
-) -> pd.DataFrame
+# Evaluación diaria con log rotativo por fecha
+0 7 * * * /opt/wrf/evaluacion/evaluacion_diaria.sh \
+          >> /opt/wrf/evaluacion/logs/cron_$(date +\%Y\%m\%d).log 2>&1
 ```
 
-Genera un script R, lo ejecuta como subproceso, importa el resultado a pandas y limpia todos los archivos temporales.
+### Modo reproceso (fecha específica)
 
-**Parámetros:**
+```bash
+# Reprocesar una fecha histórica
+bash evaluacion_diaria.sh 2026-02-15
 
-| Parámetro | Tipo | Descripción |
-|---|---|---|
-| `network_name` | `str` | Nombre de la red — filtra `stations_sinaica` |
-| `station_name` | `str` | Nombre exacto de la estación según SINAICA |
-| `parameter` | `str` | Código del contaminante: `"PM10"`, `"PM2.5"`, `"O3"` |
-| `start_date` | `str` | Fecha de inicio `"YYYY-MM-DD"` |
-| `end_date` | `str` | Fecha de fin `"YYYY-MM-DD"` |
-
-**Retorna:** `pd.DataFrame` con datos horarios, o `pd.DataFrame()` vacío si no hay datos o hay error.
-
-**Archivos temporales:**
-
-| Archivo | Creado por | Eliminado por | Garantía |
-|---|---|---|---|
-| `temp_script.R` | Python (`open().write()`) | Python (`os.remove()`) | Al finalizar la función |
-| `temp_data.csv` | Script R (`write.csv()`) | Python (`os.remove()` en `finally`) | Siempre, aunque falle la lectura |
-
----
-
-### `process_and_save()`
-
-```python
-def process_and_save() -> None
+# Reprocesar con Python del venv
+PYTHON_BIN=/opt/wrf/evaluacion/.venv/bin/python3 \
+  bash evaluacion_diaria.sh 2026-02-15
 ```
 
-Función principal de orquestación. Itera sobre todas las combinaciones de red × estación × mes × parámetro, acumula los datos y genera un archivo consolidado por estación.
+En modo reproceso, si los CSV de SINAICA del día ya existen y tienen suficientes registros, se reutilizan (no se vuelven a descargar).
 
-**Lógica de promedio diario (PM10 y PM2.5):**
+### Descarga individual con `sinaica_descarga.sh`
 
-```python
-if param in ["PM10", "PM2.5"]:
-    df_month["date"] = pd.to_datetime(df_month["date"])
-    df_month = (
-        df_month
-        .groupby(["station_id", df_month["date"].dt.date])
-        .agg({"value": "mean"})
-        .reset_index()
-    )
-    df_month["parametro"] = param
+```bash
+# O3 de la estación 249, un día, salida CSV
+bash sinaica_descarga.sh -e 249 -p O3 -f 2026-02-24 -r 1dia -c
+
+# PM10 validado para un mes completo
+bash sinaica_descarga.sh -e 271 -p PM10 -f 2026-01-01 -r 1mes -t V -c -o pm10_ene.csv
+
+# PM2.5 dos semanas, JSON a stdout
+bash sinaica_descarga.sh -e 251 -p PM2.5 -f 2026-02-10 -r 2semanas
+
+# Ayuda completa
+bash sinaica_descarga.sh -h
+```
+
+### Verificar una ejecución
+
+```bash
+# Ver el log del día anterior
+tail -100 logs/evaluacion_$(date -d yesterday +%Y-%m-%d).log
+
+# Listar HTML generados este mes
+ls -lh web/$(date +%Y)/$(date +%m)/
+
+# Probar la cadena de procesamiento completa sin crontab
+bash evaluacion_diaria.sh $(date -d yesterday +%Y-%m-%d)
 ```
 
 ---
 
-## Flujo de Ejecución
+## Estructura del repositorio
 
 ```
-process_and_save()
+ddsinaica/
 │
-├─ Red: Toluca
-│   ├─ Estación: Toluca Centro
-│   │   ├─ Mes 2025-04
-│   │   │   ├─ PM10  → download_data_r() → promedio 24 h → df
-│   │   │   ├─ PM2.5 → download_data_r() → promedio 24 h → df
-│   │   │   └─ O3    → download_data_r() → horario       → df
-│   │   ├─ Mes 2025-05  (idem)
-│   │   └─ ...
-│   │       └─ Guardar: calidad_aire_Toluca_Toluca_Centro.csv
-│   └─ Estación: Ceboruco  (idem) ...
-├─ Red: Puebla     (idem) ...
-├─ Red: Tlaxcala   (idem) ...
-├─ Red: Pachuca    (idem) ...
-└─ Red: Cuernavaca (idem) ...
-```
-
-**Estimado de peticiones** para 10 meses de periodo:
-
-```
-15 estaciones × 3 parámetros × 10 meses = 450 llamadas
-Tiempo estimado de ejecución: 6 – 7 minutos (solo hay 11 estaciones con datos en el período)
-```
-
----
-
-## Estructura de Archivos de Salida
-
-Un archivo por estación, en el directorio de trabajo actual.
-
-**Convención de nombre:** `calidad_aire_<Red>_<Estacion>.<ext>`
-(espacios → `_`, puntos eliminados)
-
-```
-calidad_aire_Toluca_Toluca_Centro.csv
-calidad_aire_Puebla_Las_Ninfas.csv
-calidad_aire_Pachuca_Primaria_Ignacio_Zaragoza.csv
-```
-
-**Columnas — O3 (datos horarios):**
-
-| Columna | Tipo | Descripción |
-|---|---|---|
-| `id` | `str` | Identificador único del registro |
-| `date` | `str` | Fecha `YYYY-MM-DD` |
-| `hour` | `int` | Hora de la medición (0–23, hora local) |
-| `value` | `float` | Valor medido |
-| `valid` | `int` | Indicador de validez (1 = válido) |
-| `unit` | `str` | Unidad (`ppm`, `µg/m³`) |
-| `station_id` | `int` | ID numérico de la estación |
-| `station_name` | `str` | Nombre de la estación |
-
-**Columnas — PM10 / PM2.5 (promedio diario 24 h):**
-
-| Columna | Tipo | Descripción |
-|---|---|---|
-| `station_id` | `int` | ID numérico de la estación |
-| `date` | `date` | Fecha del promedio diario |
-| `value` | `float` | Promedio de 24 horas |
-| `parametro` | `str` | Código del parámetro (`PM10` o `PM2.5`) |
-
----
-
-## Correcciones Aplicadas
-
-### ✅ Bug 1 — `df_month.empty` sin verificar si es `None`
-
-**Causa:** `download_data_r()` podía retornar `None` en ciertos casos de error. Llamar `.empty` sobre `None` lanza `AttributeError`.
-
-```python
-# ❌ ANTES — falla si df_month es None
-if not df_month.empty:
-```
-
-```python
-# ✅ DESPUÉS — verificación segura
-if df_month is not None and not df_month.empty:
+├── evaluacion_diaria.sh          # Orquestador diario (crontab)
+├── sinaica_descarga.sh           # Descarga HTTP directa de SINAICA
+├── calidad_aire_pipeline.sh      # Separación y consolidación de observaciones
+├── 01_extrae.py                  # Pipeline histórico mensual (modo manual)
+├── requirements.txt              # Dependencias Python
+│
+├── conf/
+│   └── estaciones.conf           # Catálogo de estaciones SINAICA (TSV)
+│
+├── observado/                    # CSVs consolidados por ciudad (input del análisis)
+│   ├── Valle_de_Mexico_O3_consolidado.csv
+│   └── ...
+│
+├── modelo/                       # Series históricas del modelo WRF-Chem
+│   ├── maximos_diarios_o3_CDMX.csv
+│   └── ...
+│
+├── combinado/
+│   ├── combinado_CDMX_O3.csv     # Obs + modelo sin ajuste
+│   └── ajustados/
+│       └── eval_o3_CDMX_YYYY-MM-DD.csv   # Un CSV por fecha evaluada
+│
+├── logs/
+│   └── evaluacion_YYYY-MM-DD.log
+│
+├── tmp/                          # Scratch (se limpia al final de cada ejecución)
+│   ├── raw_sinaica/
+│   │   └── YYYY-MM-DD/
+│   │       └── sinaica_<ID>_<Cont>_<Fecha>.csv
+│   ├── pipeline_work/
+│   │   ├── calidad_aire_<Ciudad>_<Estacion>.csv
+│   │   ├── salida/
+│   │   └── consolidado/
+│   └── extraidos/
+│       └── ext_<cont>_<ciudad>_h<n>.csv
+│
+└── web/                          # Sitio web estático
+    ├── index.html                # Índice histórico de reportes
+    ├── css/
+    │   └── estilo.css
+    └── YYYY/
+        └── MM/
+            └── evaluacion_YYYY-MM-DD.html
 ```
 
 ---
 
-### ✅ Bug 2 — `temp_data.csv` no se eliminaba si la lectura fallaba
+## Flujo de datos
 
-**Causa:** Si `pd.read_csv()` lanzaba una excepción, el `os.remove()` que venía después no se ejecutaba, dejando el archivo en disco y contaminando la siguiente iteración.
+```mermaid
+flowchart TD
+    A[conf/estaciones.conf] -->|IDs de estaciones| B[sinaica_descarga.sh]
+    B -->|CSV crudo por estación| C[Normalización awk]
+    C -->|calidad_aire_*.csv| D[calidad_aire_pipeline.sh]
+    D -->|*_consolidado.csv| E[observado/]
 
-```python
-# ❌ ANTES — os.remove() no se ejecuta si read_csv falla
-df = pd.read_csv("temp_data.csv")
-os.remove("temp_data.csv")   # ← no llega aquí si hay excepción
+    F[LUSTRE / wrfout × 3 fechas] --> G[extract_dia.py]
+    G -->|ext_*.csv| H[combinar_dia.py]
+    E --> H
+
+    H -->|eval_*.csv| I[combinado/ajustados/]
+    I --> J[stats_dia.py]
+    J -->|stats_YYYY-MM-DD.json| K[generar_html.py]
+    K -->|evaluacion_YYYY-MM-DD.html| L[web/YYYY/MM/]
+    L --> M[actualizar_indice.py]
+    M --> N[web/index.html]
 ```
 
-```python
-# ✅ DESPUÉS — finally garantiza la eliminación siempre
-try:
-    df = pd.read_csv("temp_data.csv")
-except Exception as exc:
-    print(f"  [ERROR lectura CSV] {exc}")
-finally:
-    os.remove("temp_data.csv")   # siempre se ejecuta
+---
+
+## Manejo de errores
+
+### Comportamiento ante fallos parciales
+
+El script está diseñado para ser **tolerante a fallos parciales**: si un componente no está disponible, el proceso continúa con los datos que sí existen y registra la advertencia en el log.
+
+| Situación | Comportamiento |
+|-----------|---------------|
+| 0 de 3 wrfout disponibles | **Aborta** con código 1 (fallo crítico) |
+| 1 o 2 de 3 wrfout disponibles | Continúa; rellena con `NA` los horizontes faltantes |
+| Descarga SINAICA fallida (3 reintentos) | Advertencia en log; continúa con observaciones previas en `observado/` |
+| CSV con menos de 18 registros | Se descarta y registra como inválido |
+| Error en extracción Python | Advertencia; los otros horizontes continúan |
+| Error en generación HTML | Advertencia; el índice histórico se actualiza igualmente |
+
+### Interpretación del log
+
+```
+2026-03-15 07:01:42 [INFO]   ↓ est=249 | Merced | O3 | Valle de México
+2026-03-15 07:01:44 [OK]     ✓ sinaica_249_O3_2026-03-14.csv — 24 registros
+2026-03-15 07:02:11 [WARN]   ✗ 2026-03-12 → NO encontrado: /LUSTRE/.../wrfout_...
+2026-03-15 07:04:33 [OK]     ✓ Extracción horizonte 1 OK.
+```
+
+### Verificar la salida del crontab
+
+```bash
+# Resumen rápido del día
+grep -E "\[OK\]|\[WARN\]|\[ERROR\]" logs/evaluacion_$(date -d yesterday +%Y-%m-%d).log
+
+# Verificar que el HTML existe
+test -f web/$(date -d yesterday +%Y)/$(date -d yesterday +%m)/evaluacion_$(date -d yesterday +%Y-%m-%d).html \
+  && echo "HTML OK" || echo "HTML FALTANTE"
 ```
 
 ---
 
-## Notas Técnicas
+## Ciudades y contaminantes
 
-### Iteración mensual
-`relativedelta(months=1)` de `python-dateutil` maneja correctamente meses de distinta longitud y años bisiestos.
+### Dominio WRF-Chem
 
-### Estación "Primaria Ignacio Zaragoza" (Pachuca)
-No estaba en el catálogo oficial `stations_sinaica` al momento del desarrollo. Se agrega manualmente dentro del script R con `station_id = 501`.
+| Ciudad (modelo) | Ciudad (SINAICA) | Lat S | Lat N | Lon O | Lon E |
+|-----------------|-----------------|-------|-------|-------|-------|
+| CDMX | Valle de México | 19.20 | 19.70 | −99.30 | −98.85 |
+| Toluca | Toluca | 19.23 | 19.39 | −99.72 | −99.50 |
+| Puebla | Puebla | 18.95 | 19.12 | −98.32 | −98.10 |
+| Tlaxcala | Tlaxcala | 19.29 | 19.36 | −98.26 | −98.15 |
+| Pachuca | Pachuca | 20.03 | 20.13 | −98.80 | −98.67 |
+| Cuernavaca | Cuernavaca | 18.89 | 18.98 | −99.26 | −99.14 |
+| SJdelRio | San Juan del Río | 20.36 | 20.41 | −100.01 | −99.93 |
 
-> ⚠️ **Verificar** que `station_id = 501` corresponda al ID real en el portal SINAICA antes de ejecutar en producción.
+### Contaminantes y umbrales normativos
 
-### Tipo de datos
-`"Crude"` (datos crudos, no validados) garantiza disponibilidad inmediata. Los datos `"Validated"` pueden tener rezago de semanas o meses.
-
-### Codificación de salida
-- CSV: `utf-8-sig` (UTF-8 con BOM, compatible con Excel en español)
-- JSON: `force_ascii=False` (preserva caracteres especiales: tildes, ñ)
-
-### Concurrencia
-El script es **secuencial**. Para ~450 peticiones, el tiempo total puede ser de **5 a 10 minutos** dependiendo de la latencia del servidor SINAICA.
-
----
-
-## Fuentes de Datos
-
-| Recurso | URL |
-|---|---|
-| Portal SINAICA | https://sinaica.inecc.gob.mx |
-| Paquete rsinaica (R) | https://github.com/diegovalle/rsinaica |
-| Documentación rsinaica | https://hoyodesmog.diegovalle.net/rsinaica/ |
-| API interna SINAICA | `POST https://sinaica.inecc.gob.mx/lib/libd/cnxn.php` |
+| Contaminante | Código modelo | Unidad | Umbral dicotómico | Norma |
+|-------------|--------------|--------|-------------------|-------|
+| Ozono | o3 | ppbv | 135 | NOM-020-SSA1 |
+| PM10 | PM10 | µg/m³ | 75 | NOM-025-SSA1-2021 |
+| PM2.5 | PM25 | µg/m³ | 45 | NOM-025-SSA1-2021 |
 
 ---
 
-> **Sobre los datos:** Los valores de tipo `"Crude"` son preliminares y no han pasado por el proceso de validación oficial del INECC. Para análisis que requieran datos definitivos, usar `"Validated"`.
+## Métricas de validación
+
+Calculadas sobre una ventana deslizante de **30 días** para los tres horizontes de pronóstico.
+
+### Continuas
+
+| Métrica | Descripción |
+|---------|-------------|
+| BIAS | Sesgo sistemático: media(modelo − obs) |
+| RMSE | Raíz del error cuadrático medio |
+| MAE | Error absoluto medio |
+| R | Coeficiente de correlación de Pearson |
+
+### Dicotómicas (tabla de contingencia 2×2)
+
+| Métrica | Descripción |
+|---------|-------------|
+| POD | Probabilidad de detección: H/(H+M) |
+| FAR | Tasa de falsas alarmas: F/(H+F) |
+| CSI | Índice de éxito crítico: H/(H+M+F) |
+| TSS | Pierce Skill Score: POD − POFD |
+| PC | Porcentaje correcto: (H+C)/N |
+
+### Semáforo visual en la página HTML
+
+| Color | Criterio BIAS | Criterio R |
+|-------|--------------|------------|
+| 🟢 Verde | \|BIAS\| < 10 | R ≥ 0.7 |
+| 🟡 Ámbar | 10 ≤ \|BIAS\| < 25 | 0.4 ≤ R < 0.7 |
+| 🔴 Rojo | \|BIAS\| ≥ 25 | R < 0.4 |
+
+---
+
+## Contribución
+
+Las contribuciones son bienvenidas. Por favor seguir el siguiente flujo:
+
+1. Hacer fork del repositorio.
+2. Crear una rama descriptiva: `git checkout -b feat/nombre-de-la-mejora`.
+3. Hacer los cambios con commits atómicos y mensajes claros en español o inglés.
+4. Asegurarse de que `bash -n evaluacion_diaria.sh` no reporta errores de sintaxis.
+5. Probar localmente con `bash evaluacion_diaria.sh <fecha-histórica>`.
+6. Abrir un Pull Request describiendo el cambio y su motivación.
+
+### Reporte de errores
+
+Abrir un Issue en GitHub incluyendo:
+- La fecha de ejecución que falló
+- Las últimas 50 líneas del log correspondiente
+- Salida de `bash --version` y `python3 --version`
+
+---
+
+## Licencia
+
+MIT License — ver archivo [LICENSE](LICENSE).
+
+```
+Copyright (c) 2026  Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software...
+```
+
+---
+
+*Generado automáticamente por el pipeline WRF-Chem / Calidad del Aire — Centro de México.*
