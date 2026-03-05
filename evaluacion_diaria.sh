@@ -438,22 +438,102 @@ if [[ ! -f "${CONF_EST}" ]]; then
 #
 # Estaciones de ejemplo verificadas (IDs ilustrativos — verificar en SINAICA):
 # ---------------------------------------------------------------------------
-249	CDMX	O3	Valle de México	Merced
-250	CDMX	PM10	Valle de México	Merced
-251	CDMX	PM2.5	Valle de México	Merced
-999	Toluca	O3	Toluca	Toluca Centro
-999	Toluca	PM10	Toluca	Toluca Centro
-999	Toluca	PM2.5	Toluca	Toluca Centro
-999	Puebla	O3	Puebla	Las Ninfas
-999	Puebla	PM10	Puebla	Las Ninfas
-999	Tlaxcala	O3	Tlaxcala	Palacio de Gobierno
-999	Tlaxcala	PM10	Tlaxcala	Palacio de Gobierno
+134	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
+134	Cuernavaca	PM10	Cuernavaca	Cuernavaca 01
+134	Cuernavaca	PM2.5	Cuernavaca	Cuernavaca 01
+95	Pachuca	O3	Pachuca	Instituto Tecnológico de Pachuca
+95	Pachuca	PM10	Pachuca	Instituto Tecnológico de Pachuca
+95	Pachuca PM2.5	Pachuca	Instituto Tecnológico de Pachuca
 501	Pachuca	O3	Pachuca	Primaria Ignacio Zaragoza
-501	Pachuca	PM10	Pachuca	Primaria Ignacio Zaragoza
-999	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
-999	Cuernavaca	PM10	Cuernavaca	Cuernavaca 01
-999	SJdelRio	O3	San Juan del Rio	San Juan del Rio
-999	SJdelRio	PM10	San Juan del Rio	San Juan del Rio
+484	Puebla	O3	Puebla	Atlixco
+484	Puebla	PM10	Puebla	Atlixco
+484	Puebla	PM2.5	Puebla	Atlixco
+162	Puebla	O3	Puebla	Las Ninfas
+162	Puebla	PM10	Puebla	Las Ninfas
+162	Puebla	PM2.5	Puebla	Las Ninfas
+485	Puebla	O3	Puebla	San Martín Texmelucan
+485	Puebla	PM10	Puebla	San Martín Texmelucan
+485	Puebla	PM2.5	Puebla	San Martín Texmelucan
+483	Puebla	O3	Puebla	Tehuacán
+483	Puebla	PM10	Puebla	Tehuacán
+483	Puebla	PM2.5	Puebla	Tehuacán
+406	Puebla	O3	Puebla	Universidad Tecnológica de Puebla
+406	Puebla  PM10	Puebla	Universidad Tecnológica de Puebla
+406	Puebla  PM2.5	Puebla	Universidad Tecnológica de Puebla
+410	San Juan del Rio	O3	San Juan del Rio	San Juan del Río
+410	San Juan del Rio	PM2.5	San Juan del Rio	San Juan del Río
+220	Tlaxcala	O3	Tlaxcala	Palacio de Gobierno
+220	Tlaxcala	PM10	Tlaxcala	Palacio de Gobierno
+220	Tlaxcala	PM2.5	Tlaxcala	Palacio de Gobierno
+456	Toluca	O3	Toluca	Almoloya de Juárez
+456	Toluca	PM10	Toluca	Almoloya de Juárez
+456	Toluca	PM2.5	Toluca	Almoloya de Juárez
+123	Toluca	O3	Toluca	Ceboruco
+123	Toluca	PM10	Toluca	Ceboruco
+123	Toluca	PM2.5	Toluca	Ceboruco
+125	Toluca	O3	Toluca	Metepec
+125	Toluca	PM10	Toluca	Metepec
+125	Toluca	PM2.5	Toluca	Metepec
+126	Toluca	O3	Toluca	Oxtotitlán
+126	Toluca	PM10	Toluca	Oxtotitlán
+126	Toluca	PM2.5	Toluca	Oxtotitlán
+124	Toluca	O3	Toluca	Toluca Centro
+124	Toluca	PM10	Toluca	Toluca Centro
+124	Toluca	PM2.5   Toluca	Toluca Centro
+242	CDMX	O3	Valle de México	Ajusco Medio
+242	CDMX	PM10	Valle de México	Ajusco Medio
+242	CDMX	PM2.5	Valle de México	Ajusco Medio
+243	CDMX	O3	Valle de México	Atizapán
+243	CDMX	PM10	Valle de México	Atizapán
+244	CDMX	O3	Valle de México	Camarones
+244	CDMX	PM10	Valle de México	Camarones
+244	CDMX	PM2.5	Valle de México	Camarones
+245	CDMX	O3	Valle de México	Centro de Ciencias de la Atmósfera
+245	CDMX	PM2.5	Valle de México	Centro de Ciencias de la Atmósfera
+248	CDMX	O3	Valle de México	Cuajimalpa
+248	CDMX	PM10	Valle de México	Cuajimalpa
+249	CDMX	O3	Valle de México	Cuautitlán
+249	CDMX	PM10	Valle de México	Cuautitlán
+250	CDMX	O3	Valle de México	FES Acatlán
+250	CDMX	PM10	Valle de México	FES Acatlán
+251	CDMX	O3	Valle de México	Hospital General de México
+251	CDMX	PM10	Valle de México	Hospital General de México
+251	CDMX	PM2.5	Valle de México	Hospital General de México
+253	CDMX	O3	Valle de México	La Presa
+254	CDMX	O3	Valle de México	Los Laureles
+256	CDMX	O3	Valle de México	Merced
+256	CDMX	PM10	Valle de México	Merced
+256	CDMX	PM2.5	Valle de México	Merced
+263	CDMX	O3	Valle de México	Miguel Hidalgo
+263	CDMX	PM10	Valle de México	Miguel Hidalgo
+263	CDMX	PM2.5	Valle de México	Miguel Hidalgo
+257	CDMX	O3	Valle de México	Montecillo
+257	CDMX	PM2.5	Valle de México	Montecillo
+258	CDMX	O3	Valle de México	Nezahualcóyotl
+258	CDMX	PM10	Valle de México	Nezahualcóyotl
+258	CDMX	PM2.5	Valle de México	Nezahualcóyotl
+259	CDMX	O3	Valle de México	Pedregal
+259	CDMX	PM10	Valle de México	Pedregal
+259	CDMX	PM2.5	Valle de México	Pedregal
+260	CDMX	O3	Valle de México	San Agustín
+260	CDMX	PM10	Valle de México	San Agustín
+260	CDMX	PM2.5	Valle de México	San Agustín
+432	CDMX	O3	Valle de México	Santiago Acahualtepec
+432	CDMX	PM2.5	Valle de México	Santiago Acahualtepec
+265	CDMX	O3	Valle de México	Tlahuac
+265	CDMX	PM10	Valle de México	Tlahuac
+266	CDMX	O3	Valle de México	Tlalnepantla
+266	CDMX	PM10	Valle de México	Tlalnepantla
+266	CDMX	PM2.5	Valle de México	Tlalnepantla
+267	CDMX	O3	Valle de México	Tultitlán
+267	CDMX	PM10	Valle de México	Tultitlán
+268	CDMX	O3	Valle de México	UAM Iztapalapa
+268	CDMX	PM10	Valle de México	UAM Iztapalapa
+268	CDMX	PM2.5	Valle de México	UAM Iztapalapa
+269	CDMX	O3	Valle de México	UAM Xochimilco
+269	CDMX	PM2.5	Valle de México	UAM Xochimilco
+270	CDMX	O3	Valle de México	Villa de las Flores
+270	CDMX	PM10	Valle de México	Villa de las Flores
 EOF
     warn "  Plantilla creada. Editar ${CONF_EST} con los IDs reales."
 fi
