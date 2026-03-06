@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# evaluacion_diaria.sh  v2.0.0
+# evaluacion_diaria.sh  v2.1.0
 # =============================================================================
 #
 # DESCRIPCIÓN
@@ -10,9 +10,9 @@
 # observaciones horarias de la red SINAICA/INECC para siete ciudades del
 # centro de México.
 #
-# A partir de la v2.0.0 la descarga de observaciones se realiza íntegramente
+# A partir de la v2.1.0 la descarga de observaciones se realiza íntegramente
 # mediante sinaica_descarga.sh (HTTP directo), eliminando la dependencia de
-# baja_CAMe.py / R / rsinaica.
+# baja_CAMe.py / R / rsinaica. Se actualizan mapeo de estaciones y combina.py
 #
 # FLUJO DE EJECUCIÓN
 # ------------------
@@ -137,13 +137,13 @@ declare -a CIUDADES_WRF=(
 
 # Mapeo nombre modelo → prefijo del consolidado de observaciones
 declare -A CIUDAD_OBS_MAP=(
-    [CDMX]="Valle_de_Mexico"
+    [CDMX]="CDMX"
     [Toluca]="Toluca"
     [Puebla]="Puebla"
     [Tlaxcala]="Tlaxcala"
     [Pachuca]="Pachuca"
     [Cuernavaca]="Cuernavaca"
-    [SJdelRio]="San_Juan_del_Rio"
+    [SJdelRio]="San Juan del Rio"
 )
 
 # --------------------------------------------------------------------------
@@ -902,6 +902,20 @@ cat > "${DIR_TMP}/combinar_dia.py" << PYEOF
 """
 combinar_dia.py  —  Une el máximo observado del día con los tres horizontes del modelo.
 
+Problemas corregidos respecto a la versión anterior:
+  1. Fecha del consolidado en formato YYYYMMDD (sin guiones):
+       date,hour,Cuernavaca_01
+       20260301,0,0.000413...
+     Se normaliza a YYYY-MM-DD con pd.to_datetime(..., format="mixed") antes
+     de comparar.
+  2. Unidades O3: el consolidado contiene valores en ppmv (0.000413...).
+     El modelo ya entrega ppbv (71.09...).
+     Se aplica FACTOR_CONV["o3"] = 1000 al máximo observado.
+  3. Fecha a filtrar en el observado: siempre es FECHA_EVAL (el día que se
+     evalúa), independientemente del horizonte. La columna "Fecha" de cada
+     ext_*.csv contiene la fecha del run, no la fecha evaluada; se usa
+     FECHA_EVAL para filtrar el consolidado en los tres horizontes.
+
 Lee:
   - ${DIR_OBS}/<Ciudad_OBS>_<Cont_OBS>_consolidado.csv
   - ${DIR_TMP}/extraidos/ext_<cont>_<ciudad>_h<n>.csv
@@ -910,7 +924,8 @@ Escribe:
   - ${DIR_AJUSTADOS}/eval_<cont>_<ciudad>_${FECHA_EVAL}.csv
     Columnas: Fecha, Ciudad, max_obs, mod_dia1, mod_dia2, mod_dia3
 """
-import os, glob
+import os
+import glob
 import pandas as pd
 import numpy as np
 
@@ -932,59 +947,170 @@ CIUDAD_OBS = {
     "SJdelRio":   "${CIUDAD_OBS_MAP[SJdelRio]}",
 }
 CONT_OBS_LABEL = {"o3": "O3", "PM10": "PM10", "PM25": "PM2.5"}
-FACTOR_CONV    = {"o3": 1000.0, "PM10": 1.0, "PM25": 1.0}
 
-for cont in ["o3","PM10","PM25"]:
-    for ciudad in CIUDADES:
-        # ── Observaciones ──────────────────────────────────────────────────────
-        patron   = os.path.join(DIR_OBS,
-            f"{CIUDAD_OBS[ciudad]}_{CONT_OBS_LABEL[cont]}_consolidado.csv")
-        archivos = glob.glob(patron)
-        max_obs  = np.nan
+# O3 observado viene en ppmv → multiplicar × 1000 para obtener ppbv.
+# PM10 y PM2.5 ya están en µg/m³ en ambas fuentes.
+FACTOR_CONV = {"o3": 1000.0, "PM10": 1.0, "PM25": 1.0}
 
-        if archivos:
+
+def detectar_formato_fecha(serie: pd.Series) -> str:
+    """
+    Detecta el formato de fecha inspeccionando los primeros valores no nulos.
+
+    Lógica:
+      - Si el valor contiene '-'            →  formato ISO con guiones (%Y-%m-%d)
+      - Si el valor es 8 dígitos numéricos  →  formato compacto (%Y%m%d)
+        Este caso cubre el bug conocido del consolidado CDMX, que contiene
+        fechas desde 1997 (ej. '19970101') junto a fechas recientes ('20260305')
+        porque la página de SINAICA devuelve histórico completo en algunos casos.
+      - De lo contrario                     →  'mixed' (pandas infiere por fila)
+    """
+    muestra = serie.dropna().head(10).astype(str)
+    for val in muestra:
+        val = val.strip()
+        if not val or val.lower() in ("nan", "nat", "none"):
+            continue
+        if "-" in val:
+            return "%Y-%m-%d"
+        if val.isdigit() and len(val) == 8:
+            return "%Y%m%d"
+    return "mixed"
+
+
+def leer_consolidado(path: str) -> pd.DataFrame | None:
+    """
+    Lee un CSV consolidado de observaciones y normaliza la columna de fecha
+    a dtype datetime64, manejando los siguientes formatos conocidos:
+
+      - YYYYMMDD   (ej. 20260301): formato que genera calidad_aire_pipeline.sh
+                   También presente en archivos históricos con fechas desde 1997
+                   (bug conocido del sitio SINAICA para algunas estaciones/redes).
+      - YYYY-MM-DD (ej. 2026-03-01): formato ISO estándar.
+
+    El formato se detecta automáticamente a partir de una muestra de los
+    primeros valores no nulos, evitando el parseo costoso fila a fila que
+    usa format='mixed' sobre archivos con decenas de miles de filas.
+
+    Retorna None si el archivo no existe o no puede leerse.
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        # Leer todo como texto para evitar que pandas malinterprete fechas
+        # numéricas como enteros (ej. 20260301 → int en lugar de string)
+        df = pd.read_csv(path, dtype=str)
+    except Exception as exc:
+        print(f"  [COMB] Error leyendo {path}: {exc}")
+        return None
+
+    # Detectar columna de fecha: puede llamarse 'date' o 'fecha'
+    col_f = None
+    for candidate in ("date", "fecha"):
+        if candidate in df.columns:
+            col_f = candidate
+            break
+    if col_f is None:
+        print(f"  [COMB] Columna de fecha no encontrada en {path}")
+        return None
+
+    # Detectar formato y parsear con el formato explícito correspondiente.
+    # El uso de format= explícito es ~10× más rápido que format='mixed' o
+    # infer_datetime_format sobre archivos grandes (26k+ filas como CDMX).
+    fmt = detectar_formato_fecha(df[col_f])
+    try:
+        if fmt == "mixed":
+            # Último recurso: pandas infiere el formato por cada fila
             try:
-                df = pd.read_csv(archivos[0])
-                # El consolidado puede tener columna 'date' (baja_CAMe) o 'fecha' (sinaica_descarga)
-                col_f = "date" if "date" in df.columns else "fecha"
-                df[col_f] = pd.to_datetime(df[col_f])
-                dia = df[df[col_f].dt.strftime("%Y-%m-%d") == FECHA_EVAL]
-                if not dia.empty:
-                    cols_v = [c for c in dia.columns
-                              if c not in (col_f, "date","fecha","hour","hora")]
-                    vals   = dia[cols_v].apply(pd.to_numeric, errors="coerce")
-                    max_obs = float(vals.max().max()) * FACTOR_CONV[cont]
-            except Exception as exc:
-                print(f"  [COMB] Error obs {ciudad}/{cont}: {exc}")
+                df[col_f] = pd.to_datetime(df[col_f], format="mixed", dayfirst=False)
+            except TypeError:
+                # pandas < 2.0 no acepta format="mixed"
+                df[col_f] = pd.to_datetime(df[col_f], infer_datetime_format=True)
+        else:
+            df[col_f] = pd.to_datetime(df[col_f], format=fmt)
+    except Exception as exc:
+        print(f"  [COMB] Error parseando fechas en {path} (formato={fmt}): {exc}")
+        return None
+
+    df.rename(columns={col_f: "date"}, inplace=True)
+    return df
+
+
+def max_diario_obs(df: pd.DataFrame, fecha_str: str, factor: float) -> float:
+    """
+    Dado el DataFrame del consolidado (columna 'date' ya normalizada),
+    filtra las filas del día indicado y retorna el máximo entre todas las
+    estaciones (columnas de valor) multiplicado por factor.
+    """
+    fecha = pd.Timestamp(fecha_str)
+    dia = df[df["date"].dt.normalize() == fecha]
+    if dia.empty:
+        return float("nan")
+    # Columnas de valores: todo excepto 'date' y 'hour'/'hora'
+    cols_v = [c for c in dia.columns if c not in ("date", "hour", "hora")]
+    vals = dia[cols_v].apply(pd.to_numeric, errors="coerce")
+    raw_max = float(vals.max().max())
+    return raw_max * factor if not np.isnan(raw_max) else float("nan")
+
+
+# ── Procesar cada combinación ciudad × contaminante ───────────────────────────
+for cont in ["o3", "PM10", "PM25"]:
+    for ciudad in CIUDADES:
+
+        # ── 1. Cargar y filtrar observaciones ────────────────────────────────
+        nombre_obs = CIUDAD_OBS[ciudad]
+        cont_obs   = CONT_OBS_LABEL[cont]
+        patron     = os.path.join(DIR_OBS, f"{nombre_obs}_{cont_obs}_consolidado.csv")
+        archivos   = glob.glob(patron)
+
+        max_obs = float("nan")
+        if archivos:
+            df_obs = leer_consolidado(archivos[0])
+            if df_obs is not None:
+                max_obs = max_diario_obs(df_obs, FECHA_EVAL, FACTOR_CONV[cont])
+                if np.isnan(max_obs):
+                    print(f"  [COMB] Sin datos para {ciudad}/{cont} en {FECHA_EVAL} "
+                          f"(archivo: {os.path.basename(archivos[0])})")
+            else:
+                print(f"  [COMB] No se pudo leer: {archivos[0]}")
         else:
             print(f"  [COMB] Sin archivo obs: {patron}")
 
-        # ── Modelo (tres horizontes) ───────────────────────────────────────────
+        # ── 2. Leer valores del modelo por horizonte ─────────────────────────
+        # Cada ext_*.csv tiene una sola fila con la fecha del run y el valor
+        # extraído para ese horizonte; se toma directamente el campo 'valor'.
         mod = {}
-        for h in [1,2,3]:
+        for h in [1, 2, 3]:
             csv_h = os.path.join(DIR_EXTRAIDOS, f"ext_{cont}_{ciudad}_h{h}.csv")
             if os.path.exists(csv_h):
                 try:
                     df_h = pd.read_csv(csv_h)
-                    mod[f"mod_dia{h}"] = float(df_h["valor"].iloc[0]) if not df_h.empty else np.nan
-                except Exception:
-                    mod[f"mod_dia{h}"] = np.nan
+                    val  = df_h["valor"].iloc[0] if not df_h.empty else float("nan")
+                    mod[f"mod_dia{h}"] = float(val)
+                except Exception as exc:
+                    print(f"  [COMB] Error leyendo modelo h{h} {ciudad}/{cont}: {exc}")
+                    mod[f"mod_dia{h}"] = float("nan")
             else:
-                mod[f"mod_dia{h}"] = np.nan
+                mod[f"mod_dia{h}"] = float("nan")
 
-        # ── Guardar fila combinada ─────────────────────────────────────────────
-        fila = {"Fecha": FECHA_EVAL, "Ciudad": ciudad, "max_obs": max_obs,
-                "mod_dia1": mod.get("mod_dia1",np.nan),
-                "mod_dia2": mod.get("mod_dia2",np.nan),
-                "mod_dia3": mod.get("mod_dia3",np.nan)}
+        # ── 3. Guardar fila combinada ─────────────────────────────────────────
+        fila = {
+            "Fecha":    FECHA_EVAL,
+            "Ciudad":   ciudad,
+            "max_obs":  round(max_obs, 4) if not np.isnan(max_obs) else float("nan"),
+            "mod_dia1": round(mod["mod_dia1"], 4) if not np.isnan(mod["mod_dia1"]) else float("nan"),
+            "mod_dia2": round(mod["mod_dia2"], 4) if not np.isnan(mod["mod_dia2"]) else float("nan"),
+            "mod_dia3": round(mod["mod_dia3"], 4) if not np.isnan(mod["mod_dia3"]) else float("nan"),
+        }
         csv_out = os.path.join(DIR_SALIDA, f"eval_{cont}_{ciudad}_{FECHA_EVAL}.csv")
         pd.DataFrame([fila]).to_csv(csv_out, index=False)
 
-        obs_s = f"{max_obs:.1f}" if not pd.isna(max_obs) else "NA"
-        print(f"  {ciudad:<12} {cont:<5}  obs={obs_s:>7}"
-              f"  d1={str(round(mod.get('mod_dia1',float('nan')),1)):>7}"
-              f"  d2={str(round(mod.get('mod_dia2',float('nan')),1)):>7}"
-              f"  d3={str(round(mod.get('mod_dia3',float('nan')),1)):>7}")
+        # Resumen en log
+        obs_s = f"{max_obs:.2f}" if not np.isnan(max_obs) else "NA"
+        d1_s  = f"{mod['mod_dia1']:.2f}" if not np.isnan(mod["mod_dia1"]) else "NA"
+        d2_s  = f"{mod['mod_dia2']:.2f}" if not np.isnan(mod["mod_dia2"]) else "NA"
+        d3_s  = f"{mod['mod_dia3']:.2f}" if not np.isnan(mod["mod_dia3"]) else "NA"
+        print(f"  {ciudad:<12} {cont:<5}  obs={obs_s:>8}  "
+              f"d1={d1_s:>8}  d2={d2_s:>8}  d3={d3_s:>8}")
 
 print("[COMB] Completado.")
 PYEOF
