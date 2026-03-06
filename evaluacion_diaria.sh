@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# evaluacion_diaria.sh  v2.1.0
+# evaluacion_diaria.sh  v2.2.0
 # =============================================================================
 #
 # DESCRIPCIÓN
@@ -10,9 +10,9 @@
 # observaciones horarias de la red SINAICA/INECC para siete ciudades del
 # centro de México.
 #
-# A partir de la v2.1.0 la descarga de observaciones se realiza íntegramente
+# A partir de la v2.2.0 la descarga de observaciones se realiza íntegramente
 # mediante sinaica_descarga.sh (HTTP directo), eliminando la dependencia de
-# baja_CAMe.py / R / rsinaica. Se actualizan mapeo de estaciones y combina.py
+# baja_CAMe.py / R / rsinaica.
 #
 # FLUJO DE EJECUCIÓN
 # ------------------
@@ -78,7 +78,7 @@
 # AUTOR
 # -----
 #   Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
-#   v2.0.0  |  2026
+#   v2.2.0  |  2026
 #
 # =============================================================================
 
@@ -143,7 +143,7 @@ declare -A CIUDAD_OBS_MAP=(
     [Tlaxcala]="Tlaxcala"
     [Pachuca]="Pachuca"
     [Cuernavaca]="Cuernavaca"
-    [SJdelRio]="San Juan del Rio"
+    [SJdelRio]="San_Juan_del_Rio"
 )
 
 # --------------------------------------------------------------------------
@@ -353,7 +353,7 @@ require_file "${PIPELINE_SH}"
 {
 printf '%s\n' \
   "============================================================" \
-  " EVALUACIÓN DIARIA WRF-Chem  v2.0.0" \
+  " EVALUACIÓN DIARIA WRF-Chem  v2.2.0" \
   " Modo          : ${MODO_EJECUCION}" \
   " Fecha eval    : ${FECHA_EVAL}" \
   " Run D1 (+24h) : ${RUN_D1}" \
@@ -429,57 +429,11 @@ if [[ ! -f "${CONF_EST}" ]]; then
 # CONT_SINAICA : O3 | PM10 | PM2.5
 # CIUDAD_WRF   : CDMX | Toluca | Puebla | Tlaxcala | Pachuca | Cuernavaca | SJdelRio
 #
-# PASOS PARA COMPLETAR:
-#   1. Ir a https://sinaica.inecc.gob.mx  →  Datos  →  buscar la estación
-#   2. El ID numérico aparece en la URL (ej. estacionId=249)
-#   3. Reemplazar los IDs de ejemplo (999) por los reales
-#   4. Agregar / eliminar filas según necesidad
-#   5. Las líneas que empiezan con # son comentarios y se ignoran
+# IDs verificados en el portal SINAICA (marzo 2026).
+# Las líneas que empiezan con # son comentarios y se ignoran.
+# =============================================================================
 #
-# Estaciones de ejemplo verificadas (IDs ilustrativos — verificar en SINAICA):
-# ---------------------------------------------------------------------------
-134	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
-134	Cuernavaca	PM10	Cuernavaca	Cuernavaca 01
-134	Cuernavaca	PM2.5	Cuernavaca	Cuernavaca 01
-95	Pachuca	O3	Pachuca	Instituto Tecnológico de Pachuca
-95	Pachuca	PM10	Pachuca	Instituto Tecnológico de Pachuca
-95	Pachuca PM2.5	Pachuca	Instituto Tecnológico de Pachuca
-501	Pachuca	O3	Pachuca	Primaria Ignacio Zaragoza
-484	Puebla	O3	Puebla	Atlixco
-484	Puebla	PM10	Puebla	Atlixco
-484	Puebla	PM2.5	Puebla	Atlixco
-162	Puebla	O3	Puebla	Las Ninfas
-162	Puebla	PM10	Puebla	Las Ninfas
-162	Puebla	PM2.5	Puebla	Las Ninfas
-485	Puebla	O3	Puebla	San Martín Texmelucan
-485	Puebla	PM10	Puebla	San Martín Texmelucan
-485	Puebla	PM2.5	Puebla	San Martín Texmelucan
-483	Puebla	O3	Puebla	Tehuacán
-483	Puebla	PM10	Puebla	Tehuacán
-483	Puebla	PM2.5	Puebla	Tehuacán
-406	Puebla	O3	Puebla	Universidad Tecnológica de Puebla
-406	Puebla  PM10	Puebla	Universidad Tecnológica de Puebla
-406	Puebla  PM2.5	Puebla	Universidad Tecnológica de Puebla
-410	San Juan del Rio	O3	San Juan del Rio	San Juan del Río
-410	San Juan del Rio	PM2.5	San Juan del Rio	San Juan del Río
-220	Tlaxcala	O3	Tlaxcala	Palacio de Gobierno
-220	Tlaxcala	PM10	Tlaxcala	Palacio de Gobierno
-220	Tlaxcala	PM2.5	Tlaxcala	Palacio de Gobierno
-456	Toluca	O3	Toluca	Almoloya de Juárez
-456	Toluca	PM10	Toluca	Almoloya de Juárez
-456	Toluca	PM2.5	Toluca	Almoloya de Juárez
-123	Toluca	O3	Toluca	Ceboruco
-123	Toluca	PM10	Toluca	Ceboruco
-123	Toluca	PM2.5	Toluca	Ceboruco
-125	Toluca	O3	Toluca	Metepec
-125	Toluca	PM10	Toluca	Metepec
-125	Toluca	PM2.5	Toluca	Metepec
-126	Toluca	O3	Toluca	Oxtotitlán
-126	Toluca	PM10	Toluca	Oxtotitlán
-126	Toluca	PM2.5	Toluca	Oxtotitlán
-124	Toluca	O3	Toluca	Toluca Centro
-124	Toluca	PM10	Toluca	Toluca Centro
-124	Toluca	PM2.5   Toluca	Toluca Centro
+# ── CDMX / Valle de México ──────────────────────────────────────
 242	CDMX	O3	Valle de México	Ajusco Medio
 242	CDMX	PM10	Valle de México	Ajusco Medio
 242	CDMX	PM2.5	Valle de México	Ajusco Medio
@@ -504,9 +458,6 @@ if [[ ! -f "${CONF_EST}" ]]; then
 256	CDMX	O3	Valle de México	Merced
 256	CDMX	PM10	Valle de México	Merced
 256	CDMX	PM2.5	Valle de México	Merced
-263	CDMX	O3	Valle de México	Miguel Hidalgo
-263	CDMX	PM10	Valle de México	Miguel Hidalgo
-263	CDMX	PM2.5	Valle de México	Miguel Hidalgo
 257	CDMX	O3	Valle de México	Montecillo
 257	CDMX	PM2.5	Valle de México	Montecillo
 258	CDMX	O3	Valle de México	Nezahualcóyotl
@@ -518,8 +469,9 @@ if [[ ! -f "${CONF_EST}" ]]; then
 260	CDMX	O3	Valle de México	San Agustín
 260	CDMX	PM10	Valle de México	San Agustín
 260	CDMX	PM2.5	Valle de México	San Agustín
-432	CDMX	O3	Valle de México	Santiago Acahualtepec
-432	CDMX	PM2.5	Valle de México	Santiago Acahualtepec
+263	CDMX	O3	Valle de México	Miguel Hidalgo
+263	CDMX	PM10	Valle de México	Miguel Hidalgo
+263	CDMX	PM2.5	Valle de México	Miguel Hidalgo
 265	CDMX	O3	Valle de México	Tlahuac
 265	CDMX	PM10	Valle de México	Tlahuac
 266	CDMX	O3	Valle de México	Tlalnepantla
@@ -534,6 +486,62 @@ if [[ ! -f "${CONF_EST}" ]]; then
 269	CDMX	PM2.5	Valle de México	UAM Xochimilco
 270	CDMX	O3	Valle de México	Villa de las Flores
 270	CDMX	PM10	Valle de México	Villa de las Flores
+432	CDMX	O3	Valle de México	Santiago Acahualtepec
+432	CDMX	PM2.5	Valle de México	Santiago Acahualtepec
+#
+# ── Toluca ──────────────────────────────────────────────────────
+123	Toluca	O3	Toluca	Ceboruco
+123	Toluca	PM10	Toluca	Ceboruco
+123	Toluca	PM2.5	Toluca	Ceboruco
+124	Toluca	O3	Toluca	Toluca Centro
+124	Toluca	PM10	Toluca	Toluca Centro
+124	Toluca	PM2.5	Toluca	Toluca Centro
+125	Toluca	O3	Toluca	Metepec
+125	Toluca	PM10	Toluca	Metepec
+125	Toluca	PM2.5	Toluca	Metepec
+126	Toluca	O3	Toluca	Oxtotitlán
+126	Toluca	PM10	Toluca	Oxtotitlán
+126	Toluca	PM2.5	Toluca	Oxtotitlán
+456	Toluca	O3	Toluca	Almoloya de Juárez
+456	Toluca	PM10	Toluca	Almoloya de Juárez
+456	Toluca	PM2.5	Toluca	Almoloya de Juárez
+#
+# ── Puebla ──────────────────────────────────────────────────────
+162	Puebla	O3	Puebla	Las Ninfas
+162	Puebla	PM10	Puebla	Las Ninfas
+162	Puebla	PM2.5	Puebla	Las Ninfas
+406	Puebla	O3	Puebla	Universidad Tecnológica de Puebla
+406	Puebla	PM10	Puebla	Universidad Tecnológica de Puebla
+406	Puebla	PM2.5	Puebla	Universidad Tecnológica de Puebla
+483	Puebla	O3	Puebla	Tehuacán
+483	Puebla	PM10	Puebla	Tehuacán
+483	Puebla	PM2.5	Puebla	Tehuacán
+484	Puebla	O3	Puebla	Atlixco
+484	Puebla	PM10	Puebla	Atlixco
+484	Puebla	PM2.5	Puebla	Atlixco
+485	Puebla	O3	Puebla	San Martín Texmelucan
+485	Puebla	PM10	Puebla	San Martín Texmelucan
+485	Puebla	PM2.5	Puebla	San Martín Texmelucan
+#
+# ── Tlaxcala ────────────────────────────────────────────────────
+220	Tlaxcala	O3	Tlaxcala	Palacio de Gobierno
+220	Tlaxcala	PM10	Tlaxcala	Palacio de Gobierno
+220	Tlaxcala	PM2.5	Tlaxcala	Palacio de Gobierno
+#
+# ── Pachuca ─────────────────────────────────────────────────────
+501	Pachuca	O3	Pachuca	Primaria Ignacio Zaragoza
+95	Pachuca	O3	Pachuca	Instituto Tecnológico de Pachuca
+95	Pachuca	PM10	Pachuca	Instituto Tecnológico de Pachuca
+95	Pachuca	PM2.5	Pachuca	Instituto Tecnológico de Pachuca
+#
+# ── Cuernavaca ──────────────────────────────────────────────────
+134	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
+134	Cuernavaca	PM10	Cuernavaca	Cuernavaca 01
+134	Cuernavaca	PM2.5	Cuernavaca	Cuernavaca 01
+#
+# ── San Juan del Río ────────────────────────────────────────────
+410	SJdelRio	O3	San Juan del Rio	San Juan del Río
+410	SJdelRio	PM2.5	San Juan del Rio	San Juan del Río
 EOF
     warn "  Plantilla creada. Editar ${CONF_EST} con los IDs reales."
 fi
@@ -917,11 +925,11 @@ Problemas corregidos respecto a la versión anterior:
      FECHA_EVAL para filtrar el consolidado en los tres horizontes.
 
 Lee:
-  - ${DIR_OBS}/<Ciudad_OBS>_<Cont_OBS>_consolidado.csv
-  - ${DIR_TMP}/extraidos/ext_<cont>_<ciudad>_h<n>.csv
+  - \${DIR_OBS}/<Ciudad_OBS>_<Cont_OBS>_consolidado.csv
+  - \${DIR_TMP}/extraidos/ext_<cont>_<ciudad>_h<n>.csv
 
 Escribe:
-  - ${DIR_AJUSTADOS}/eval_<cont>_<ciudad>_${FECHA_EVAL}.csv
+  - \${DIR_AJUSTADOS}/eval_<cont>_<ciudad>_\${FECHA_EVAL}.csv
     Columnas: Fecha, Ciudad, max_obs, mod_dia1, mod_dia2, mod_dia3
 """
 import os
@@ -1665,7 +1673,8 @@ DUR_FMT="$(( DURACION / 60 ))m $(( DURACION % 60 ))s"
 {
 printf '%s\n' \
   "============================================================" \
-  " EJECUCIÓN COMPLETADA  v2.1.0" \
+  " EJECUCIÓN COMPLETADA  v2.2.0" \
+
   " Fecha evaluada  : ${FECHA_EVAL}" \
   " WRF disponibles : ${n_wrfout}/3" \
   " Descarga SINAICA: OK=${n_ok} FALLO=${n_fallo} OMITIDO=${n_omitido}" \

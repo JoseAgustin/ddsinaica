@@ -6,6 +6,128 @@ y versionado semántico [SemVer](https://semver.org/lang/es/).
 
 ---
 
+## [v2.2.0] — 2026-03-15
+
+### Resumen ejecutivo
+
+Versión de corrección y consolidación posterior al lanzamiento de v2.0.0.
+Resuelve tres defectos detectados en producción que impedían la combinación
+correcta de observaciones y modelo en `combinar_dia.py`, e incorpora una descripción técnico-sanitaria contextualizada
+directamente en la página HTML de resultados.
+
+---
+
+### Added
+
+- **Sección descriptiva en la página HTML de resultados**
+  (`generar_html.py`, Sección 11 de `evaluacion_diaria.sh`).
+  Se agregó un bloque informativo fijo inmediatamente debajo del encabezado y
+  antes de los KPIs numéricos. El contenido se genera dinámicamente a partir
+  de las variables del script (`{flt}`, `{UMBRAL['o3']}`, `{VENTANA}`, etc.)
+  y comprende:
+  - Descripción del propósito de la página, el modelo WRF-Chem, las siete
+    ciudades del dominio y la fuente de observaciones (SINAICA/INECC).
+  - Caracterización sanitaria y normativa de cada contaminante (O₃, PM10,
+    PM2.5): mecanismo de formación o emisión, vías de ingreso al organismo,
+    efectos en salud documentados y umbral normativo de referencia
+    (NOM-020-SSA1, NOM-025-SSA1-2021).
+  - Explicación de los tres horizontes de pronóstico (+24 h, +48 h, +72 h)
+    con los mismos chips de color que aparecen en las tablas de resultados.
+  - Guía de lectura del semáforo de métricas (verde/ámbar/rojo) con los
+    criterios de BIAS y R reproducidos en línea.
+
+  Los umbrales y la ventana estadística son dinámicos: si se modifican en la
+  Sección 1 del script, la descripción de la página los refleja
+  automáticamente sin edición adicional. La sección usa exclusivamente estilos
+  en línea (`style=`), sin clases nuevas en `estilo.css`, por lo que las
+  páginas ya publicadas en fechas anteriores no se ven afectadas.
+
+---
+
+### Fixed
+
+- **`combinar_dia.py` — la combinación obs + modelo producía `NaN` para
+  todas las ciudades y contaminantes** (`evaluacion_diaria.sh`, Sección 9).
+  Se identificaron y corrigieron tres defectos independientes que actuaban
+  en cascada:
+
+  1. **Parseo de fecha en formato `YYYYMMDD` (sin guiones)**.
+     El consolidado generado por `calidad_aire_pipeline.sh` almacena las
+     fechas sin separadores (`20260301`). `pd.to_datetime()` sin argumento
+     `format=` interpretaba estos valores como enteros, produciendo fechas
+     incorrectas (o errores silenciosos) que hacían que el filtro por
+     `FECHA_EVAL` devolviera siempre un DataFrame vacío. Se introdujo la
+     función `leer_consolidado()` que lee la columna de fecha como
+     `dtype=str` y aplica el formato explícito correcto antes de parsear.
+
+  2. **Conversión de unidades de O₃ (ppmv → ppbv)**.
+     Los archivos consolidados almacenan O₃ en ppmv (valores del orden de
+     `0.000413`), mientras que el modelo entrega ppbv (`71.09`). El factor
+     de conversión `FACTOR_CONV["o3"] = 1000.0` estaba definido pero no se
+     aplicaba porque el filtro de fecha (bug 1) fallaba antes de llegar a
+     esa línea. Con el parseo corregido, la multiplicación × 1000 ahora se
+     ejecuta en todos los casos.
+
+  3. **Comparación de fechas con `dt.strftime()` sustituida por
+     `dt.normalize()`**.
+     La comparación de cadenas `df[col_f].dt.strftime("%Y-%m-%d") == FECHA_EVAL`
+     es frágil ante microsegundos o zonas horarias residuales en el índice
+     datetime. Se reemplazó por
+     `df["date"].dt.normalize() == pd.Timestamp(FECHA_EVAL)`, que opera
+     sobre objetos `datetime64` truncados a día y es robusto en cualquier
+     contexto.
+
+- **`combinar_dia.py` — consolidado de CDMX no se filtraba correctamente
+  por el historial desde 1997** (`evaluacion_diaria.sh`, Sección 9).
+  El archivo `CDMX_O3_consolidado.csv` contiene 26 271 líneas con fechas
+  desde el 1 de enero de 1997, consecuencia de un bug del sitio SINAICA que
+  devuelve el histórico completo para algunas redes. La función
+  `leer_consolidado()` introducida en la corrección anterior usaba
+  `format="mixed"`, que obliga a pandas a inferir el formato fila a fila
+  resultando hasta 10× más lento sobre archivos grandes, con riesgo de
+  interrupción por timeout en el entorno crontab.
+  Se añadió la función `detectar_formato_fecha()` que inspecciona los
+  primeros 10 valores no nulos de la columna y determina el formato una sola
+  vez, permitiendo el parseo vectorizado:
+
+  | Muestra detectada | Formato asignado | Velocidad relativa |
+  |-------------------|-----------------|-------------------|
+  | `19970101` (8 dígitos sin guiones) | `%Y%m%d` | ~10× más rápido |
+  | `2026-03-05` (ISO con guiones) | `%Y-%m-%d` | ~10× más rápido |
+  | Otro patrón | `mixed` (fallback) | línea base |
+
+  Con `format="%Y%m%d"` explícito, las 26 k filas del histórico de CDMX se
+  convierten en un único paso vectorizado y el filtro por `FECHA_EVAL`
+  localiza correctamente los registros recientes al final del archivo.
+
+---
+
+### Technical notes
+
+#### Interacción en cascada de los tres bugs de `combinar_dia.py`
+
+Los tres defectos corregidos actuaban en cascada: el fallo de parseo de
+fecha (bug 1) hacía que `dia.empty` fuese siempre `True`, con lo que
+`max_obs` quedaba como `NaN` para todas las ciudades. Esto enmascaraba los
+bugs 2 y 3, que nunca llegaban a ejecutarse. La combinación resultante
+contenía únicamente valores `NaN`, lo que aguas abajo producía métricas
+vacías y una página HTML sin datos numéricos, sin generar ningún error
+explícito en el log.
+
+#### Criterio del umbral de recorte en `sinaica_descarga.sh`
+
+El umbral de 24 registros para activar `[TRIM]` se eligió porque
+`rango=1dia` debe devolver exactamente 24 observaciones horarias (horas
+0–23). Cualquier valor superior indica inequívocamente que el servidor
+incluyó al menos un día adicional. Cuando hay huecos en las mediciones
+(menos de 24 horas reportadas para la fecha solicitada), el filtro es
+inerte y el CSV conserva todas las filas disponibles sin pérdida de
+información.
+
+---
+
+---
+
 ## [v2.0.0] — 2026-03-15
 
 ### Resumen ejecutivo
@@ -193,6 +315,8 @@ antes de usar en producción.**
 
 ---
 
+---
+
 ## [v1.0.0] — 2026-01-15
 
 ### Resumen
@@ -214,5 +338,8 @@ observaciones y genera reportes HTML diarios.
 - Sitio web estático con índice histórico y páginas HTML por día.
 
 ---
+
+---
+
 
 *Mantenido por el equipo del Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México.*
