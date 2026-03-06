@@ -1428,6 +1428,96 @@ html = f"""<!DOCTYPE html>
   </div>
 </header>
 <main style="max-width:1400px;margin:0 auto;padding:.5rem 1rem 2rem;">
+
+  <!-- ═══════════════════════════════════════════════════════════
+       DESCRIPCIÓN DE LA PÁGINA
+       ═══════════════════════════════════════════════════════════ -->
+  <section style="margin-top:1.4rem;background:#fff;border-radius:12px;
+                  padding:1.2rem 1.6rem;box-shadow:0 2px 8px rgba(0,0,0,.08);
+                  border-left:5px solid var(--az);">
+    <h2 style="font-size:1rem;font-weight:700;color:var(--az);margin-bottom:.6rem;">
+      ¿Qué muestra esta página?
+    </h2>
+    <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;margin-bottom:.7rem;">
+      Esta página presenta la <strong>evaluación diaria del pronóstico de calidad del aire</strong>
+      generado por el modelo meteorológico-químico <strong>WRF&#8209;Chem</strong> para
+      <strong>siete zonas metropolitanas del centro de México</strong>
+      (Ciudad de México, Toluca, Puebla, Tlaxcala, Pachuca, Cuernavaca y San Juan del Río).
+      Los resultados del modelo se contrastan con las mediciones horarias reportadas por las
+      estaciones de monitoreo de la red <strong>SINAICA&nbsp;/&nbsp;INECC</strong>
+      correspondientes al día <strong>{flt}</strong>.
+    </p>
+    <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;margin-bottom:.7rem;">
+      Se analizan tres contaminantes de interés sanitario y normativo:
+    </p>
+    <ul style="font-size:.88rem;line-height:1.8;color:#3a3a3a;
+               padding-left:1.4rem;margin-bottom:.8rem;">
+      <li>
+        <strong>Ozono (O₃)</strong> — contaminante fotoquímico secundario formado por la
+        reacción de precursores en presencia de luz solar. Concentraciones elevadas irritan
+        las vías respiratorias y pueden agravar enfermedades cardiovasculares y pulmonares.
+        El umbral de referencia utilizado es
+        <strong>{UMBRAL['o3']}&nbsp;ppbv</strong> (NOM&#8209;020&#8209;SSA1).
+      </li>
+      <li>
+        <strong>Partículas suspendidas gruesas (PM10)</strong> — partículas con diámetro
+        aerodinámico ≤&nbsp;10&nbsp;µm, de origen tanto natural (polvo, suelo resuspendido)
+        como antrópico (tráfico, industria). Penetran la nariz y la garganta y pueden
+        alcanzar los bronquios. Umbral: <strong>{UMBRAL['PM10']}&nbsp;µg/m³</strong>
+        en promedio de 24&nbsp;h (NOM&#8209;025&#8209;SSA1&#8209;2021).
+      </li>
+      <li>
+        <strong>Partículas suspendidas finas (PM2.5)</strong> — fracción con diámetro
+        ≤&nbsp;2.5&nbsp;µm, principalmente de combustión. Por su pequeño tamaño alcanzan
+        los alvéolos pulmonares y pueden pasar al torrente sanguíneo, con efectos
+        cardiovasculares documentados a largo plazo. Umbral:
+        <strong>{UMBRAL['PM25']}&nbsp;µg/m³</strong> en 24&nbsp;h
+        (NOM&#8209;025&#8209;SSA1&#8209;2021).
+      </li>
+    </ul>
+    <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;margin-bottom:.7rem;">
+      El modelo WRF&#8209;Chem produce pronósticos de hasta 72&nbsp;horas de anticipación.
+      Para el día evaluado se comparan <strong>tres horizontes de pronóstico</strong>
+      independientes, cada uno correspondiente a un ciclo de inicialización distinto:
+    </p>
+    <ul style="font-size:.88rem;line-height:1.8;color:#3a3a3a;
+               padding-left:1.4rem;margin-bottom:.8rem;">
+      <li><span style="display:inline-block;padding:.1rem .55rem;border-radius:10px;
+          font-size:.78rem;font-weight:700;background:#fde8e8;color:#c0392b;
+          margin-right:.4rem">+24&nbsp;h</span>
+        Pronóstico emitido el mismo día de evaluación — mayor frescura inicial,
+        horizonte de corto plazo.
+      </li>
+      <li><span style="display:inline-block;padding:.1rem .55rem;border-radius:10px;
+          font-size:.78rem;font-weight:700;background:#e8f5e9;color:#1a7a3a;
+          margin-right:.4rem">+48&nbsp;h</span>
+        Pronóstico emitido un día antes — horizonte de mediano plazo operativo.
+      </li>
+      <li><span style="display:inline-block;padding:.1rem .55rem;border-radius:10px;
+          font-size:.78rem;font-weight:700;background:#e3f2fd;color:#1557a0;
+          margin-right:.4rem">+72&nbsp;h</span>
+        Pronóstico emitido dos días antes — horizonte de largo plazo; permite
+        evaluar la degradación de la habilidad predictiva con el tiempo.
+      </li>
+    </ul>
+    <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;">
+      Las <strong>métricas estadísticas</strong> (BIAS, RMSE, R, POD, FAR, CSI) se
+      calculan sobre una ventana móvil de los últimos <strong>{VENTANA}&nbsp;días</strong>
+      para proveer contexto de desempeño acumulado. El semáforo de colores
+      (<span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+       background:#27ae60;vertical-align:middle;margin:0 3px"></span>verde
+      /&nbsp;<span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+       background:#f39c12;vertical-align:middle;margin:0 3px"></span>ámbar
+      /&nbsp;<span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+       background:#e74c3c;vertical-align:middle;margin:0 3px"></span>rojo)
+      sintetiza visualmente la calidad del pronóstico para facilitar la interpretación
+      operativa por parte del equipo técnico.
+    </p>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       KPIs DE RESUMEN
+       ═══════════════════════════════════════════════════════════ -->
   <section style="margin-top:1.2rem;">
     <h2 style="font-size:1.1rem;color:var(--az);margin-bottom:.7rem;">📋 Resumen</h2>
     <div class="kgrid">
