@@ -1674,7 +1674,6 @@ DUR_FMT="$(( DURACION / 60 ))m $(( DURACION % 60 ))s"
 printf '%s\n' \
   "============================================================" \
   " EJECUCIÓN COMPLETADA  v2.2.0" \
-
   " Fecha evaluada  : ${FECHA_EVAL}" \
   " WRF disponibles : ${n_wrfout}/3" \
   " Descarga SINAICA: OK=${n_ok} FALLO=${n_fallo} OMITIDO=${n_omitido}" \
