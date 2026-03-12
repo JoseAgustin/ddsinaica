@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# evaluacion_diaria.sh  v2.2.0
+# evaluacion_diaria.sh  v2.0.0
 # =============================================================================
 #
 # DESCRIPCIÓN
@@ -10,7 +10,7 @@
 # observaciones horarias de la red SINAICA/INECC para siete ciudades del
 # centro de México.
 #
-# A partir de la v2.2.0 la descarga de observaciones se realiza íntegramente
+# A partir de la v2.0.0 la descarga de observaciones se realiza íntegramente
 # mediante sinaica_descarga.sh (HTTP directo), eliminando la dependencia de
 # baja_CAMe.py / R / rsinaica.
 #
@@ -78,7 +78,7 @@
 # AUTOR
 # -----
 #   Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
-#   v2.2.0  |  2026
+#   v2.0.0  |  2026
 #
 # =============================================================================
 
@@ -133,6 +133,7 @@ declare -a CIUDADES_WRF=(
     "Pachuca:20.03:20.13:-98.80:-98.67"
     "Cuernavaca:18.89:18.98:-99.26:-99.14"
     "SJdelRio:20.36:20.41:-100.01:-99.93"
+    "Tula:19.8920:20.1825:-99.4447:-99.0890"
 )
 
 # Mapeo nombre modelo → prefijo del consolidado de observaciones
@@ -144,6 +145,7 @@ declare -A CIUDAD_OBS_MAP=(
     [Pachuca]="Pachuca"
     [Cuernavaca]="Cuernavaca"
     [SJdelRio]="San_Juan_del_Rio"
+    [Tula]="Tula"
 )
 
 # --------------------------------------------------------------------------
@@ -353,7 +355,7 @@ require_file "${PIPELINE_SH}"
 {
 printf '%s\n' \
   "============================================================" \
-  " EVALUACIÓN DIARIA WRF-Chem  v2.2.0" \
+  " EVALUACIÓN DIARIA WRF-Chem  v2.0.0" \
   " Modo          : ${MODO_EJECUCION}" \
   " Fecha eval    : ${FECHA_EVAL}" \
   " Run D1 (+24h) : ${RUN_D1}" \
@@ -427,7 +429,7 @@ if [[ ! -f "${CONF_EST}" ]]; then
 #   ESTACION_ID  CIUDAD_WRF  CONT_SINAICA  NOMBRE_RED           NOMBRE_ESTACION
 #
 # CONT_SINAICA : O3 | PM10 | PM2.5
-# CIUDAD_WRF   : CDMX | Toluca | Puebla | Tlaxcala | Pachuca | Cuernavaca | SJdelRio
+# CIUDAD_WRF   : CDMX | Toluca | Puebla | Tlaxcala | Pachuca | Cuernavaca | SJdelRio | Tula
 #
 # IDs verificados en el portal SINAICA (marzo 2026).
 # Las líneas que empiezan con # son comentarios y se ignoran.
@@ -533,6 +535,9 @@ if [[ ! -f "${CONF_EST}" ]]; then
 95	Pachuca	O3	Pachuca	Instituto Tecnológico de Pachuca
 95	Pachuca	PM10	Pachuca	Instituto Tecnológico de Pachuca
 95	Pachuca	PM2.5	Pachuca	Instituto Tecnológico de Pachuca
+495	Pachuca	O3	Mineral de la Reforma	Mineral de la Reforma
+495	Pachuca	PM10	Mineral de la Reforma	Mineral de la Reforma
+495	Pachuca	PM2.5	Mineral de la Reforma	Mineral de la Reforma
 #
 # ── Cuernavaca ──────────────────────────────────────────────────
 134	Cuernavaca	O3	Cuernavaca	Cuernavaca 01
@@ -542,6 +547,23 @@ if [[ ! -f "${CONF_EST}" ]]; then
 # ── San Juan del Río ────────────────────────────────────────────
 410	SJdelRio	O3	San Juan del Rio	San Juan del Río
 410	SJdelRio	PM2.5	San Juan del Rio	San Juan del Río
+#
+# ── Tula ────────────────────────────────────────────────────────
+442	Tula	O3	Tula	Universidad Tecnológica de Tula Tepeji
+442	Tula	PM10	Tula	Universidad Tecnológica de Tula Tepeji
+442	Tula	PM2.5	Tula	Universidad Tecnológica de Tula Tepeji
+87	Tula	O3	Tepeji	Primaria Melchor Ocampo
+87	Tula	PM10	Tepeji	Primaria Melchor Ocampo
+87	Tula	PM2.5	Tepeji	Primaria Melchor Ocampo
+502	Tula	O3	Tula	Primaria Venustiano Carranza
+502	Tula	PM10	Tula	Primaria Venustiano Carranza
+502	Tula	PM2.5	Tula	Primaria Venustiano Carranza
+82	Tula	O3	Atitalaquia	Centro de Salud
+82	Tula	PM10	Atitalaquia	Centro de Salud
+82	Tula	PM2.5	Atitalaquia	Centro de Salud
+83	Tula	O3	Atotonilco	Primaria Revolución
+83	Tula	PM10	Atotonilco	Primaria Revolución
+83	Tula	PM2.5	Atotonilco	Primaria Revolución
 EOF
     warn "  Plantilla creada. Editar ${CONF_EST} con los IDs reales."
 fi
@@ -782,6 +804,7 @@ CIUDADES = [
     {"nombre": "Pachuca",    "lat1": 20.03, "lat2": 20.13, "lon1": -98.80, "lon2": -98.67},
     {"nombre": "Cuernavaca", "lat1": 18.89, "lat2": 18.98, "lon1": -99.26, "lon2": -99.14},
     {"nombre": "SJdelRio",   "lat1": 20.36, "lat2": 20.41, "lon1": -100.01,"lon2": -99.93},
+    {"nombre": "Tula",       "lat1": 19.8920,"lat2": 20.1825,"lon1": -99.4447,"lon2": -99.0890},
 ]
 
 RANGOS = {1: slice(6, 30), 2: slice(30, 54), 3: slice(54, 72)}
@@ -943,7 +966,7 @@ DIR_EXTRAIDOS = "${DIR_TMP}/extraidos"
 DIR_SALIDA    = "${DIR_AJUSTADOS}"
 os.makedirs(DIR_SALIDA, exist_ok=True)
 
-CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
+CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio","Tula"]
 
 CIUDAD_OBS = {
     "CDMX":       "${CIUDAD_OBS_MAP[CDMX]}",
@@ -953,6 +976,7 @@ CIUDAD_OBS = {
     "Pachuca":    "${CIUDAD_OBS_MAP[Pachuca]}",
     "Cuernavaca": "${CIUDAD_OBS_MAP[Cuernavaca]}",
     "SJdelRio":   "${CIUDAD_OBS_MAP[SJdelRio]}",
+    "Tula":       "${CIUDAD_OBS_MAP[Tula]}",
 }
 CONT_OBS_LABEL = {"o3": "O3", "PM10": "PM10", "PM25": "PM2.5"}
 
@@ -1154,7 +1178,7 @@ DIR_TMP       = "${DIR_TMP}"
 VENTANA_DIAS  = ${VENTANA_DIAS}
 UMBRAL        = {"o3": ${UMBRAL[o3]}, "PM10": ${UMBRAL[PM10]}, "PM25": ${UMBRAL[PM25]}}
 
-CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
+CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio","Tula"]
 
 
 def metricas_continuas(obs: np.ndarray, mod: np.ndarray) -> dict:
@@ -1336,9 +1360,9 @@ VENTANA    = ${VENTANA_DIAS}
 json_path = os.path.join(DIR_TMP, f"stats_{FECHA_EVAL}.json")
 html_out  = os.path.join(DIR_WEB, ANIO, MES, f"evaluacion_{FECHA_EVAL}.html")
 
-CIUDADES   = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio"]
+CIUDADES   = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio","Tula"]
 ICONOS     = {"CDMX":"🏙️","Toluca":"🏔️","Puebla":"⛩️","Tlaxcala":"🌾",
-              "Pachuca":"⛏️","Cuernavaca":"🌺","SJdelRio":"🌊"}
+              "Pachuca":"⛏️","Cuernavaca":"🌺","SJdelRio":"🌊","Tula":"🏭"}
 CLB        = {"o3":"O₃ (ppbv)","PM10":"PM10 (µg/m³)","PM25":"PM2.5 (µg/m³)"}
 HLB        = {"mod_dia1":"+24 h","mod_dia2":"+48 h","mod_dia3":"+72 h"}
 HCP        = {"mod_dia1":"d1","mod_dia2":"d2","mod_dia3":"d3"}
@@ -1673,7 +1697,7 @@ DUR_FMT="$(( DURACION / 60 ))m $(( DURACION % 60 ))s"
 {
 printf '%s\n' \
   "============================================================" \
-  " EJECUCIÓN COMPLETADA  v2.2.0" \
+  " EJECUCIÓN COMPLETADA  v2.0.0" \
   " Fecha evaluada  : ${FECHA_EVAL}" \
   " WRF disponibles : ${n_wrfout}/3" \
   " Descarga SINAICA: OK=${n_ok} FALLO=${n_fallo} OMITIDO=${n_omitido}" \

@@ -6,13 +6,215 @@ y versionado semántico [SemVer](https://semver.org/lang/es/).
 
 ---
 
+## [v2.3.0] — 2026-03-15
+
+### Resumen ejecutivo
+
+Ampliación del dominio de evaluación con una nueva ciudad (**Tula de Allende**)
+y una estación adicional en Pachuca. La nueva ciudad requirió actualizar de forma
+coordinada ocho puntos del script: las listas de ciudades en Bash y en los cuatro
+scripts Python generados en tiempo de ejecución, el catálogo de estaciones, el
+mapa de prefijos de consolidado y la sección descriptiva de la página HTML.
+
+---
+
+### Added
+
+- **Nueva ciudad: Tula** (`evaluacion_diaria.sh`, Secciones 1, 5, 8, 9, 10 y 11).
+  Se incorpora la zona metropolitana de Tula de Allende / Tepeji del Río al
+  dominio de evaluación. Cambios realizados en todos los puntos del script donde
+  se enumera la lista de ciudades:
+
+  | Sección | Elemento modificado | Detalle |
+  |---------|-------------------|---------|
+  | 1 — Config | `CIUDADES_WRF` | Bounding box `19.8920–20.1825 N`, `99.4447–99.0890 W` |
+  | 1 — Config | `CIUDAD_OBS_MAP` | `[Tula]="Tula"` |
+  | 5 — Descarga | `conf/estaciones.conf` | Nueva sección con 5 estaciones verificadas |
+  | 8 — Extracción | `CIUDADES` en `extract_dia.py` | Bbox para extracción del wrfout |
+  | 9 — Combinación | `CIUDADES` + `CIUDAD_OBS` en `combinar_dia.py` | Lista y dict de mapeo |
+  | 10 — Métricas | `CIUDADES` en `stats_dia.py` | Lista para cálculo de estadísticos |
+  | 11 — HTML | `CIUDADES` + `ICONOS` en `generar_html.py` | Lista y emoji 🏭 (indicativo industrial) |
+
+  Estaciones de la red Tula incluidas en `conf/estaciones.conf`
+  (IDs verificados en el portal SINAICA):
+
+  | ID | Red | Estación | Contaminantes |
+  |----|-----|----------|--------------|
+  | 442 | Tula | Universidad Tecnológica de Tula Tepeji | O3, PM10, PM2.5 |
+  | 87 | Tepeji | Primaria Melchor Ocampo | O3, PM10, PM2.5 |
+  | 502 | Tula | Primaria Venustiano Carranza | O3, PM10, PM2.5 |
+  | 82 | Atitalaquia | Centro de Salud | O3, PM10, PM2.5 |
+  | 83 | Atotonilco | Primaria Revolución | O3, PM10, PM2.5 |
+
+  Total: 15 registros en el catálogo (5 estaciones × 3 contaminantes).
+
+- **Nueva estación en Pachuca: Mineral de la Reforma** (ID=495).
+  Se agrega la estación de la red Mineral de la Reforma al catálogo de
+  estaciones de Pachuca, que pasa de 4 a 7 registros:
+
+  | ID | Red | Estación | Contaminantes |
+  |----|-----|----------|--------------|
+  | 495 | Mineral de la Reforma | Mineral de la Reforma | O3, PM10, PM2.5 |
+
+  El catálogo completo de Pachuca queda con 3 estaciones y 7 registros
+  (Primaria Ignacio Zaragoza solo para O3, Instituto Tecnológico de Pachuca
+  e Mineral de la Reforma para O3 + PM10 + PM2.5).
+
+---
+
+### Technical notes
+
+#### Resumen del catálogo de estaciones tras v2.3.0
+
+| Ciudad | Estaciones | Registros |
+|--------|:----------:|:---------:|
+| CDMX / Valle de México | 27 | 54 |
+| Toluca | 5 | 15 |
+| Puebla | 5 | 15 |
+| **Tula** | **5** | **15** |
+| Pachuca | **3** | **7** |
+| Tlaxcala | 1 | 3 |
+| Cuernavaca | 1 | 3 |
+| San Juan del Río | 1 | 2 |
+| **Total** | **48** | **114** |
+
+#### Icono de Tula (🏭)
+
+El emoji 🏭 se eligió para la ciudad de Tula por su relevancia como zona
+industrial con presencia de la refinería Miguel Hidalgo (Pemex) y la central
+termoeléctrica Francisco Pérez Ríos (CFE), que son fuentes de emisión
+primarias de SO₂, NOₓ y partículas en la región. La zona es de interés
+prioritario en estudios de calidad del aire del centro de México por la
+magnitud y continuidad de sus emisiones industriales.
+
+#### Cobertura de la bounding box de Tula
+
+El rectángulo `19.8920–20.1825 N / 99.4447–99.0890 W` cubre los municipios
+de Tula de Allende, Tepeji del Río, Atitalaquia y Atotonilco de Tula, donde
+se ubican las cinco estaciones de la red de monitoreo. Esta área es adyacente
+al dominio de CDMX pero suficientemente separada para tratarse como ciudad
+independiente en el pipeline de extracción del wrfout.
+
+---
+
 ## [v2.2.0] — 2026-03-15
+
+### Resumen ejecutivo
+
+Corrección del mapeo de nombres de ciudad entre el orquestador y los archivos
+consolidados de observaciones, más sustitución completa de la plantilla de
+`conf/estaciones.conf` por el catálogo real de estaciones verificadas en el
+portal SINAICA en marzo de 2026. Ambos cambios eran necesarios para que la
+combinación obs + modelo produjera resultados válidos en todas las ciudades.
+
+---
+
+### Added
+
+- **Catálogo completo de 96 estaciones verificadas en `conf/estaciones.conf`**
+  (plantilla embebida en `evaluacion_diaria.sh`, Sección 5).
+  Se reemplazaron las 16 entradas de ejemplo (varias con ID de marcador `999`)
+  por el catálogo verificado en el portal SINAICA en marzo de 2026.
+  El catálogo cubre las siete ciudades del dominio:
+
+  | Ciudad | Estaciones | Registros en catálogo |
+  |--------|:----------:|:---------------------:|
+  | CDMX / Valle de México | 27 | 54 |
+  | Toluca | 5 | 15 |
+  | Puebla | 5 | 15 |
+  | Tlaxcala | 1 | 3 |
+  | Pachuca | 2 | 4 |
+  | Cuernavaca | 1 | 3 |
+  | San Juan del Río | 1 | 2 |
+  | **Total** | **42** | **96** |
+
+  Notas del catálogo:
+  - La estación **Primaria Ignacio Zaragoza** (Pachuca, ID=501) se conserva
+    solo para O3 ya que no reporta PM en el portal.
+  - La estación **San Juan del Río** (ID=410) no reporta PM10; se incluyen
+    únicamente O3 y PM2.5.
+  - Las estaciones sin PM2.5 disponible en SINAICA (La Presa, Los Laureles,
+    Tlahuac, Tultitlán, Cuajimalpa, Atizapán, FES Acatlán, entre otras) se
+    registran solo con los contaminantes activos.
+  - Se eliminaron todas las entradas con ID=999 (marcadores de plantilla)
+    que generaban advertencias `[WARN]` en cada ejecución sin producir
+    datos descargados.
+  - Durante la incorporación del catálogo se detectaron y corrigieron
+    6 irregularidades de formato en el documento fuente (separadores de
+    espacio en lugar de tabulador, campo de contaminante fusionado con el
+    nombre de ciudad, valor `San Juan del Rio` en la columna `CIUDAD_WRF`
+    que debía ser `SJdelRio`). El catálogo embebido en el script usa
+    tabuladores estrictos en todas las columnas.
+
+---
+
+### Fixed
+
+- **`declare -A CIUDAD_OBS_MAP` — prefijos erróneos impedían encontrar los
+  consolidados de observaciones para CDMX y San Juan del Río**
+  (`evaluacion_diaria.sh`, Sección 1).
+
+  `combinar_dia.py` construye la ruta del archivo consolidado como:
+  ```
+  <DIR_OBS>/<CIUDAD_OBS_MAP[ciudad]>_<Contaminante>_consolidado.csv
+  ```
+  Dos entradas del mapa usaban nombres heredados del paquete R `rsinaica`
+  que no coincidían con los prefijos que genera `calidad_aire_pipeline.sh`
+  a partir de la columna `CIUDAD_WRF` del catálogo de estaciones:
+
+  | Clave | Valor anterior | Valor corregido | Causa del error |
+  |-------|---------------|-----------------|-----------------|
+  | `[CDMX]` | `"Valle_de_Mexico"` | `"CDMX"` | `rsinaica` llamaba "Valle de México" a la red; el nuevo pipeline usa la clave interna `CDMX` |
+  | `[SJdelRio]` | `"San_Juan_del_Rio"` | `"San_Juan_del_Rio"` | Sin cambio — valor ya correcto |
+
+  Con `[CDMX]="Valle_de_Mexico"`, `glob()` no encontraba el archivo
+  `CDMX_O3_consolidado.csv` y devolvía lista vacía, dejando `max_obs = NaN`
+  para CDMX en todos los contaminantes. Como CDMX es la primera ciudad en
+  el bucle y el error era silencioso, el efecto se propagaba aparentemente
+  al resto de las ciudades en los logs resumidos.
+
+---
+
+### Technical notes
+
+#### Por qué `CIUDAD_WRF` define el prefijo del consolidado
+
+`calidad_aire_pipeline.sh` toma el valor de la segunda columna del catálogo
+de estaciones (`CIUDAD_WRF`) como prefijo del archivo consolidado de salida:
+
+```
+observado/<CIUDAD_WRF>_<Contaminante>_consolidado.csv
+```
+
+Por tanto `CIUDAD_OBS_MAP` debe mapear exactamente al valor de `CIUDAD_WRF`
+usado en `conf/estaciones.conf`. El nombre de la red en SINAICA (columna 4,
+ej. "Valle de México") es solo informativo y no afecta los nombres de
+archivo.
+
+#### Compatibilidad con consolidados históricos generados con `rsinaica`
+
+Los archivos generados con `baja_CAMe.py` / `rsinaica` pueden tener el
+prefijo `Valle_de_Mexico_` en lugar de `CDMX_`. Para migrarlos:
+```bash
+cd observado/
+for f in Valle_de_Mexico_*; do
+    mv "$f" "CDMX_${f#Valle_de_Mexico_}"
+done
+```
+Alternativamente, mantener `[CDMX]="Valle_de_Mexico"` si se conservan los
+archivos con el nombre original y no se quieren renombrar.
+
+---
+
+## [v2.1.0] — 2026-03-15
 
 ### Resumen ejecutivo
 
 Versión de corrección y consolidación posterior al lanzamiento de v2.0.0.
 Resuelve tres defectos detectados en producción que impedían la combinación
-correcta de observaciones y modelo en `combinar_dia.py`, e incorpora una descripción técnico-sanitaria contextualizada
+correcta de observaciones y modelo en `combinar_dia.py`, añade un filtro de
+saneamiento de datos en la descarga de SINAICA ante respuestas con más registros
+de los esperados, e incorpora una descripción técnico-sanitaria contextualizada
 directamente en la página HTML de resultados.
 
 ---
@@ -41,6 +243,23 @@ directamente en la página HTML de resultados.
   automáticamente sin edición adicional. La sección usa exclusivamente estilos
   en línea (`style=`), sin clases nuevas en `estilo.css`, por lo que las
   páginas ya publicadas en fechas anteriores no se ven afectadas.
+
+- **Filtro anti-desbordamiento en `sinaica_descarga.sh`**
+  (bloque Python interno, opción `-c`).
+  El endpoint `POST /pags/datGrafs.php` devuelve en ocasiones más de 24
+  registros al solicitar `rango=1dia`, incluyendo datos del día anterior de
+  forma no solicitada (bug conocido del servidor SINAICA). Cuando el JSON
+  descargado supera las 24 filas, el script ahora conserva únicamente las
+  que corresponden a la `fecha` más reciente del lote (las últimas 24 horas),
+  descartando el remanente antes de escribir el CSV. El encabezado se
+  preserva siempre. El recorte se registra en stderr con la etiqueta
+  `[TRIM]`:
+  ```
+  [TRIM] 48 registros recibidos → conservando 24
+         (fecha=2026-03-05, descartados 24 del día anterior)
+  ```
+  El filtro es inerte cuando el JSON tiene ≤ 24 filas (caso normal sin
+  desbordamiento).
 
 ---
 
