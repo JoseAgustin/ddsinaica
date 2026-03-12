@@ -9,8 +9,8 @@
 #
 #   ETAPA 1 – Separación por contaminante
 #     Lee los archivos calidad_aire_*.csv del directorio
-#     actual, extrae los registros de O3, PM10 y PM2.5, y
-#     genera un CSV individual por estación y contaminante
+#     actual, extrae los registros de O3, PM10, PM2.5 y SO2,
+#     y genera un CSV individual por estación y contaminante
 #     dentro de la carpeta salida/.
 #
 #   ETAPA 2 – Consolidación por ciudad y contaminante
@@ -98,7 +98,7 @@ for file in "${fuentes[@]}"; do
 
     header=$(head -n 1 "$file")
 
-    for contaminante in O3 PM10 PM2.5; do
+    for contaminante in O3 PM10 PM2.5 SO2; do
 
         output="salida/${estacion}_${contaminante}.csv"
 
@@ -107,6 +107,8 @@ for file in "${fuentes[@]}"; do
         # Filtrar registros del contaminante.
         # IMPORTANTE: PM10 excluye explícitamente PM2.5 para evitar
         # falsos positivos en estaciones que reportan ambos juntos.
+        # SO2 usa coincidencia exacta /SO2/; no hay substrings problemáticos
+        # en la nomenclatura SINAICA, pero se mantiene el patrón defensivo.
         awk -F',' -v pol="$contaminante" '
             NR > 1 {
                 id = $1
@@ -114,6 +116,7 @@ for file in "${fuentes[@]}"; do
                 else if (pol == "PM10"  && id ~ /PM10/ &&
                                            id !~ /PM2\.5/)          print
                 else if (pol == "PM2.5" && id ~ /PM2\.5/)           print
+                else if (pol == "SO2"   && id ~ /SO2/)              print
             }
         ' "$file" >> "$output"
 
