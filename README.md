@@ -49,10 +49,10 @@ A partir de la **v2.0.0** la descarga de observaciones se realiza íntegramente 
 ║  OBSERVACIONES (SINAICA/INECC)                                   ║
 ║                                                                  ║
 ║  sinaica_descarga.sh                                             ║
-║  POST https://sinaica.inecc.gob.mx/pags/datGrafs.php            ║
-║  ┌─ por estación × contaminante × día ─┐                        ║
-║  │  tmp/raw_sinaica/<fecha>/*.csv       │                        ║
-║  └───────────────┬───────────────────  ┘                        ║
+║  POST https://sinaica.inecc.gob.mx/pags/datGrafs.php             ║
+║  ┌─ por estación × contaminante × día ─┐                         ║
+║  │  tmp/raw_sinaica/<fecha>/*.csv      │                         ║
+║  └───────────────┬─────────────────────┘                         ║
 ║                  ▼                                               ║
 ║  [Normalización awk al formato del pipeline]                     ║
 ║                  ▼                                               ║
@@ -60,18 +60,18 @@ A partir de la **v2.0.0** la descarga de observaciones se realiza íntegramente 
 ║  ├─ salida/<Ciudad>_<Estacion>_<Cont>.csv                        ║
 ║  └─ consolidado/<Ciudad>_<Cont>_consolidado.csv                  ║
 ║                  │                                               ║
-║                  └───────────► observado/  ◄──────────────────┐ ║
-╚══════════════════════════════════════════════════════════════╗  │ ║
-                                                               ║  │ ║
-╔══════════════════════════════════════════════════════════════╝  │ ║
-║  MODELO (WRF-Chem / LUSTRE)                                      │ ║
-║                                                                  │ ║
-║  wrfout_d01_YYYY-MM-DD_00:00:00 × 3 horizontes                   │ ║
-║              │                                                   │ ║
-╚══════════════╪═══════════════════════════════════════════════════╪═╝
-               │                                                   │
-               ▼                                                   │
-  extract_dia.py  ─────────────────────────────────────────────────┘
+║                  └───────────► observado/  ◄───────────────────┐ ║
+╚══════════════════════════════════════════════════════════════╗ │ ║
+                                                               ║ │ ║
+╔══════════════════════════════════════════════════════════════╝ │ ║
+║  MODELO (WRF-Chem / LUSTRE)                                    │ ║
+║                                                                │ ║
+║  wrfout_d01_YYYY-MM-DD_00:00:00 × 3 horizontes                 │ ║
+║              │                                                 │ ║
+╚══════════════╪═════════════════════════════════════════════════╪═╝
+               │                                                 │
+               ▼                                                 │
+  extract_dia.py  ───────────────────────────────────────────────┘
   O3/SO2: máx. espacial ppbv (ppmv × 1000)
   PM10/PM2.5: prom. de máx. espacial µg/m³
                │
