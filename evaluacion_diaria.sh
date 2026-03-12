@@ -152,11 +152,12 @@ declare -A CIUDAD_OBS_MAP=(
 # 1.5  Contaminantes y umbrales normativos
 # --------------------------------------------------------------------------
 # Umbrales para métricas dicotómicas:
-#   O3   → NOM-020-SSA1      (135 ppbv)
-#   PM10 → NOM-025-SSA1-2021 ( 75 µg/m³ promedio 24 h)
-#   PM25 → NOM-025-SSA1-2021 ( 45 µg/m³ promedio 24 h)
-declare -A UMBRAL=([o3]=135 [PM10]=75 [PM25]=45)
-CONTAMINANTES_MODELO=("o3" "PM10" "PM25")
+#   O3   → NOM-020-SSA1        (135 ppbv)
+#   PM10 → NOM-025-SSA1-2021   ( 75 µg/m³ promedio 24 h)
+#   PM25 → NOM-025-SSA1-2021   ( 45 µg/m³ promedio 24 h)
+#   SO2  → NOM-022-SSA1-2010   (130 ppbv promedio 24 h — equivalente a 0.13 ppm)
+declare -A UMBRAL=([o3]=135 [PM10]=75 [PM25]=45 [SO2]=130)
+CONTAMINANTES_MODELO=("o3" "PM10" "PM25" "SO2")
 
 # --------------------------------------------------------------------------
 # 1.6  Parámetros de descarga SINAICA
@@ -428,7 +429,7 @@ if [[ ! -f "${CONF_EST}" ]]; then
 #
 #   ESTACION_ID  CIUDAD_WRF  CONT_SINAICA  NOMBRE_RED           NOMBRE_ESTACION
 #
-# CONT_SINAICA : O3 | PM10 | PM2.5
+# CONT_SINAICA : O3 | PM10 | PM2.5 | SO2
 # CIUDAD_WRF   : CDMX | Toluca | Puebla | Tlaxcala | Pachuca | Cuernavaca | SJdelRio | Tula
 #
 # IDs verificados en el portal SINAICA (marzo 2026).
@@ -552,18 +553,23 @@ if [[ ! -f "${CONF_EST}" ]]; then
 442	Tula	O3	Tula	Universidad Tecnológica de Tula Tepeji
 442	Tula	PM10	Tula	Universidad Tecnológica de Tula Tepeji
 442	Tula	PM2.5	Tula	Universidad Tecnológica de Tula Tepeji
+442	Tula	SO2	Tula	Universidad Tecnológica de Tula Tepeji
 87	Tula	O3	Tepeji	Primaria Melchor Ocampo
 87	Tula	PM10	Tepeji	Primaria Melchor Ocampo
 87	Tula	PM2.5	Tepeji	Primaria Melchor Ocampo
+87	Tula	SO2	Tepeji	Primaria Melchor Ocampo
 502	Tula	O3	Tula	Primaria Venustiano Carranza
 502	Tula	PM10	Tula	Primaria Venustiano Carranza
 502	Tula	PM2.5	Tula	Primaria Venustiano Carranza
+502	Tula	SO2	Tula	Primaria Venustiano Carranza
 82	Tula	O3	Atitalaquia	Centro de Salud
 82	Tula	PM10	Atitalaquia	Centro de Salud
 82	Tula	PM2.5	Atitalaquia	Centro de Salud
+82	Tula	SO2	Atitalaquia	Centro de Salud
 83	Tula	O3	Atotonilco	Primaria Revolución
 83	Tula	PM10	Atotonilco	Primaria Revolución
 83	Tula	PM2.5	Atotonilco	Primaria Revolución
+83	Tula	SO2	Atotonilco	Primaria Revolución
 EOF
     warn "  Plantilla creada. Editar ${CONF_EST} con los IDs reales."
 fi
@@ -810,6 +816,11 @@ CIUDADES = [
 RANGOS = {1: slice(6, 30), 2: slice(30, 54), 3: slice(54, 72)}
 
 # Nombres posibles de variables PM según la versión / configuración de WRF-Chem
+# Variables de gas traza en ppmv (factor ×1000 → ppbv, igual que O3)
+VARS_GAS = {
+    "SO2": ["so2", "SO2", "so2_a"],
+}
+# Variables de partículas en µg/m³
 VARS_PM = {
     "PM10": ["PM10", "pm10"],
     "PM25": ["PM2_5_DRY", "PM2_5", "pm2_5_dry", "pm2_5"],
@@ -864,6 +875,20 @@ for c in CIUDADES:
         res["o3"] = float("nan")
         print(f"  [EXTRACT] O3 {c['nombre']}: {exc}")
 
+    # SO2 y otros gases traza (ppmv → ppbv)
+    for cont, nombres in VARS_GAS.items():
+        vn = var_disponible(ds, nombres)
+        if vn is None:
+            res[cont] = float("nan")
+            print(f"  [EXTRACT] {cont} no encontrado en {os.path.basename(RUTA_WRF)}")
+            continue
+        try:
+            gas = ds[vn].isel(bottom_top=0).where(mask) * 1000.0  # ppmv → ppbv
+            res[cont] = float(gas.isel(Time=rango).max(skipna=True).values)
+        except Exception as exc:
+            res[cont] = float("nan")
+            print(f"  [EXTRACT] {cont} {c['nombre']}: {exc}")
+
     # PM10 y PM25
     for cont, nombres in VARS_PM.items():
         vn = var_disponible(ds, nombres)
@@ -878,7 +903,7 @@ for c in CIUDADES:
             print(f"  [EXTRACT] {cont} {c['nombre']}: {exc}")
 
     # Guardar un CSV por contaminante
-    for cont_key in ["o3", "PM10", "PM25"]:
+    for cont_key in ["o3", "PM10", "PM25", "SO2"]:
         out = os.path.join(DIR_SAL, f"ext_{cont_key}_{c['nombre']}_h{HORIZONTE}.csv")
         pd.DataFrame([{
             "Fecha": FECHA_RUN, "Ciudad": c["nombre"],
@@ -888,6 +913,7 @@ for c in CIUDADES:
     print(
         f"  {c['nombre']:<12}  "
         f"O3={res.get('o3', float('nan')):.1f} ppbv  "
+        f"SO2={res.get('SO2', float('nan')):.1f} ppbv  "
         f"PM10={res.get('PM10', float('nan')):.1f}  "
         f"PM25={res.get('PM25', float('nan')):.1f} µg/m³"
     )
@@ -978,11 +1004,12 @@ CIUDAD_OBS = {
     "SJdelRio":   "${CIUDAD_OBS_MAP[SJdelRio]}",
     "Tula":       "${CIUDAD_OBS_MAP[Tula]}",
 }
-CONT_OBS_LABEL = {"o3": "O3", "PM10": "PM10", "PM25": "PM2.5"}
+CONT_OBS_LABEL = {"o3": "O3", "PM10": "PM10", "PM25": "PM2.5", "SO2": "SO2"}
 
 # O3 observado viene en ppmv → multiplicar × 1000 para obtener ppbv.
 # PM10 y PM2.5 ya están en µg/m³ en ambas fuentes.
-FACTOR_CONV = {"o3": 1000.0, "PM10": 1.0, "PM25": 1.0}
+# O3 y SO2 observados en ppmv → ×1000 para ppbv. PM en µg/m³ sin conversión.
+FACTOR_CONV = {"o3": 1000.0, "PM10": 1.0, "PM25": 1.0, "SO2": 1000.0}
 
 
 def detectar_formato_fecha(serie: pd.Series) -> str:
@@ -1085,7 +1112,7 @@ def max_diario_obs(df: pd.DataFrame, fecha_str: str, factor: float) -> float:
 
 
 # ── Procesar cada combinación ciudad × contaminante ───────────────────────────
-for cont in ["o3", "PM10", "PM25"]:
+for cont in ["o3", "PM10", "PM25", "SO2"]:
     for ciudad in CIUDADES:
 
         # ── 1. Cargar y filtrar observaciones ────────────────────────────────
@@ -1176,7 +1203,7 @@ FECHA_EVAL    = "${FECHA_EVAL}"
 DIR_AJUSTADOS = "${DIR_AJUSTADOS}"
 DIR_TMP       = "${DIR_TMP}"
 VENTANA_DIAS  = ${VENTANA_DIAS}
-UMBRAL        = {"o3": ${UMBRAL[o3]}, "PM10": ${UMBRAL[PM10]}, "PM25": ${UMBRAL[PM25]}}
+UMBRAL        = {"o3": ${UMBRAL[o3]}, "PM10": ${UMBRAL[PM10]}, "PM25": ${UMBRAL[PM25]}, "SO2": ${UMBRAL[SO2]}}
 
 CIUDADES = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio","Tula"]
 
@@ -1222,7 +1249,7 @@ def metricas_dicotomicas(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dic
 
 resultado = {}
 
-for cont in ["o3","PM10","PM25"]:
+for cont in ["o3","PM10","PM25","SO2"]:
     resultado[cont] = {}
     for ciudad in CIUDADES:
         archivos = sorted(glob.glob(
@@ -1363,10 +1390,10 @@ html_out  = os.path.join(DIR_WEB, ANIO, MES, f"evaluacion_{FECHA_EVAL}.html")
 CIUDADES   = ["CDMX","Toluca","Puebla","Tlaxcala","Pachuca","Cuernavaca","SJdelRio","Tula"]
 ICONOS     = {"CDMX":"🏙️","Toluca":"🏔️","Puebla":"⛩️","Tlaxcala":"🌾",
               "Pachuca":"⛏️","Cuernavaca":"🌺","SJdelRio":"🌊","Tula":"🏭"}
-CLB        = {"o3":"O₃ (ppbv)","PM10":"PM10 (µg/m³)","PM25":"PM2.5 (µg/m³)"}
+CLB        = {"o3":"O₃ (ppbv)","PM10":"PM10 (µg/m³)","PM25":"PM2.5 (µg/m³)","SO2":"SO₂ (ppbv)"}
 HLB        = {"mod_dia1":"+24 h","mod_dia2":"+48 h","mod_dia3":"+72 h"}
 HCP        = {"mod_dia1":"d1","mod_dia2":"d2","mod_dia3":"d3"}
-UMBRAL     = {"o3":${UMBRAL[o3]},"PM10":${UMBRAL[PM10]},"PM25":${UMBRAL[PM25]}}
+UMBRAL     = {"o3":${UMBRAL[o3]},"PM10":${UMBRAL[PM10]},"PM25":${UMBRAL[PM25]},"SO2":${UMBRAL[SO2]}}
 
 f_  = lambda v,d=1: "<span style='color:#aaa'>—</span>" if (
     v is None or (isinstance(v,float) and math.isnan(v))) else f"{v:.{d}f}"
@@ -1384,7 +1411,7 @@ ts  = datetime.now().strftime("%Y-%m-%d %H:%M")
 
 tabs = ""; panes = ""
 
-for i, cont in enumerate(["o3","PM10","PM25"]):
+for i, cont in enumerate(["o3","PM10","PM25","SO2"]):
     act = "active" if i==0 else ""
     tabs += (f'<button class="tab-btn {act}" onclick="mTab(\'{cont}\')" '
              f'id="tab-{cont}">{CLB[cont]}</button>\n')
@@ -1474,13 +1501,13 @@ html = f"""<!DOCTYPE html>
       Esta página presenta la <strong>evaluación diaria del pronóstico de calidad del aire</strong>
       generado por el modelo meteorológico-químico <strong>WRF&#8209;Chem</strong> para
       <strong>siete zonas metropolitanas del centro de México</strong>
-      (Ciudad de México, Toluca, Puebla, Tlaxcala, Pachuca, Cuernavaca y San Juan del Río).
+      (Ciudad de México, Toluca, Puebla, Tlaxcala, Pachuca, Cuernavaca, San Juan del Río y Tula de Allende).
       Los resultados del modelo se contrastan con las mediciones horarias reportadas por las
       estaciones de monitoreo de la red <strong>SINAICA&nbsp;/&nbsp;INECC</strong>
       correspondientes al día <strong>{flt}</strong>.
     </p>
     <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;margin-bottom:.7rem;">
-      Se analizan tres contaminantes de interés sanitario y normativo:
+      Se analizan cuatro contaminantes de interés sanitario y normativo:
     </p>
     <ul style="font-size:.88rem;line-height:1.8;color:#3a3a3a;
                padding-left:1.4rem;margin-bottom:.8rem;">
@@ -1506,6 +1533,18 @@ html = f"""<!DOCTYPE html>
         <strong>{UMBRAL['PM25']}&nbsp;µg/m³</strong> en 24&nbsp;h
         (NOM&#8209;025&#8209;SSA1&#8209;2021).
       </li>
+      <li>
+        <strong>Dióxido de azufre (SO₂)</strong> — gas emitido principalmente por
+        la combustión de combustibles fósiles con alto contenido de azufre y por
+        procesos industriales (refinerías, centrales termoeléctricas, fundiciones).
+        En el dominio de evaluación, la zona de Tula de Allende concentra fuentes
+        primarias de SO₂ por la presencia de la refinería Miguel Hidalgo (Pemex) y
+        la central termoeléctrica Francisco Pérez Ríos (CFE). Concentraciones
+        elevadas irritan el tracto respiratorio superior y pueden desencadenar crisis
+        asmáticas; en escala regional contribuye a la lluvia ácida y a la formación
+        de partículas secundarias (sulfatos). Umbral:
+        <strong>{UMBRAL['SO2']}&nbsp;ppbv</strong> en promedio de
+        24&nbsp;h (NOM&#8209;022&#8209;SSA1&#8209;2010, equivalente a 0.13&nbsp;ppm).
     </ul>
     <p style="font-size:.88rem;line-height:1.7;color:#3a3a3a;margin-bottom:.7rem;">
       El modelo WRF&#8209;Chem produce pronósticos de hasta 72&nbsp;horas de anticipación.
@@ -1555,7 +1594,7 @@ html = f"""<!DOCTYPE html>
     <div class="kgrid">
       <div class="kpi"><div class="kv">3</div><div class="kl">Horizontes</div></div>
       <div class="kpi"><div class="kv">7</div><div class="kl">Ciudades</div></div>
-      <div class="kpi"><div class="kv">3</div><div class="kl">Contaminantes</div></div>
+      <div class="kpi"><div class="kv">4</div><div class="kl">Contaminantes</div></div>
       <div class="kpi"><div class="kv">{VENTANA}d</div><div class="kl">Ventana métricas</div></div>
     </div>
     <p style="font-size:.82rem;color:#666;margin-top:.5rem;">

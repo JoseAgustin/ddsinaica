@@ -6,6 +6,107 @@ y versionado semántico [SemVer](https://semver.org/lang/es/).
 
 ---
 
+## [v2.4.0] — 2026-03-15
+
+### Resumen ejecutivo
+
+Incorporación de dióxido de azufre (SO₂) como cuarto contaminante evaluado
+en el pipeline. El cambio involucra 20 puntos del script distribuidos en todas
+las secciones que referencian la lista de contaminantes: configuración global,
+catálogo de estaciones, extracción del wrfout, combinación obs+modelo, cálculo
+de métricas y generación del HTML.
+
+---
+
+### Added
+
+- **SO₂ como cuarto contaminante** (`evaluacion_diaria.sh`, todas las secciones).
+
+  **Sección 1 — Configuración global:**
+  - `CONTAMINANTES_MODELO`: se añade `"SO2"`.
+  - `UMBRAL[SO2]=130`: umbral dicotómico de 130 ppbv en promedio de 24 h,
+    equivalente a 0.13 ppm según la **NOM-022-SSA1-2010**. Se añadió el
+    comentario normativo junto a O3, PM10 y PM2.5.
+
+  **Sección 5 — `conf/estaciones.conf`:**
+  - Se actualiza el comentario `CONT_SINAICA` para incluir `SO2`.
+  - Se añaden 5 registros SO2 en la sección Tula (uno por estación: IDs 442,
+    87, 502, 82, 83), llevando el total del catálogo de 114 a **119 registros**.
+    Tula es la ciudad del dominio con fuentes primarias de SO₂ (refinería
+    Pemex + termoeléctrica CFE); para las demás ciudades SINAICA devolverá
+    array vacío si la estación no mide SO₂, sin generar error en el pipeline.
+
+  **Sección 8 — `extract_dia.py`:**
+  - Se crea el diccionario `VARS_GAS` para variables de gas traza en ppmv
+    que requieren conversión ×1000 a ppbv (análogo a `VARS_PM` para partículas):
+    ```python
+    VARS_GAS = {"SO2": ["so2", "SO2", "so2_a"]}
+    ```
+    Los nombres alternativos cubren las convenciones de nomenclatura de las
+    versiones CB05 (`so2`), SAPRC99 (`SO2`) y mecanismos con aerosol (`so2_a`)
+    de WRF-Chem.
+  - Se añade un bucle de extracción para `VARS_GAS` entre el bloque de O3 y
+    el de PM, usando `isel(bottom_top=0) * 1000.0` igual que `extraer_o3()`.
+  - `"SO2"` se añade a `cont_key` y al print de resumen por ciudad.
+
+  **Sección 9 — `combinar_dia.py`:**
+  - `CONT_OBS_LABEL["SO2"] = "SO2"`: nombre del contaminante en el consolidado.
+  - `FACTOR_CONV["SO2"] = 1000.0`: conversión ppmv → ppbv, igual que O3.
+    Se añade comentario explícito sobre qué contaminantes requieren conversión.
+  - `"SO2"` añadido al bucle `for cont in [...]`.
+
+  **Sección 10 — `stats_dia.py`:**
+  - `UMBRAL["SO2"]` expandido a partir de `${UMBRAL[SO2]}`.
+  - `"SO2"` añadido al bucle `for cont in [...]`.
+
+  **Sección 11 — `generar_html.py`:**
+  - `CLB["SO2"] = "SO₂ (ppbv)"`: etiqueta de pestaña y unidades.
+  - `UMBRAL["SO2"]` expandido.
+  - `"SO2"` añadido al bucle `for i, cont in enumerate([...])` — genera
+    una cuarta pestaña en la página de resultados.
+  - KPI "Contaminantes" actualizado de **3** a **4**.
+  - Descripción narrativa de la página HTML: "tres contaminantes" → **"cuatro
+    contaminantes"**; se añade bullet con descripción sanitaria, fuentes de
+    emisión y norma del SO₂, con mención explícita a la zona de Tula de
+    Allende como fuente primaria en el dominio de evaluación.
+  - Texto introductorio actualizado para incluir **Tula de Allende** en la
+    lista de zonas metropolitanas evaluadas.
+
+---
+
+### Technical notes
+
+#### Variables SO₂ en WRF-Chem
+
+El nombre de la variable en el netCDF del wrfout depende del mecanismo
+fotoquímico configurado en el run de WRF-Chem:
+
+| Mecanismo | Nombre de variable |
+|-----------|-------------------|
+| CB05, CB6 | `so2` (minúsculas) |
+| SAPRC99, SAPRC07 | `SO2` (mayúsculas) |
+| CB05 + aerosol | `so2_a` |
+
+`var_disponible()` itera la lista `["so2", "SO2", "so2_a"]` y devuelve el
+primer nombre encontrado en el dataset. Si ninguno está presente, el valor
+se registra como `NaN` y se imprime una advertencia `[EXTRACT]`.
+
+#### Conversión de unidades SO₂ observado
+
+SINAICA reporta SO₂ en ppmv (igual que O3). El campo `FACTOR_CONV["SO2"]
+= 1000.0` convierte el máximo diario del consolidado a ppbv antes de
+combinarlo con el valor extraído del modelo, que también está en ppbv tras
+aplicar `* 1000.0` en `extract_dia.py`.
+
+#### Umbral normativo SO₂
+
+La NOM-022-SSA1-2010 establece un límite de 0.13 ppm en promedio de 24 h
+para protección de la salud. El equivalente en ppbv es:
+`0.13 ppm × 1000 = 130 ppbv`. Este es el valor usado para las métricas
+dicotómicas (POD, FAR, CSI, TSS, PC).
+
+---
+
 ## [v2.3.0] — 2026-03-15
 
 ### Resumen ejecutivo
