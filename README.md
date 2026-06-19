@@ -1,11 +1,8 @@
 # 🌫️ ddsinaica — Pipeline de Evaluación WRF-Chem vs SINAICA
 
-[![bash](https://img.shields.io/badge/bash-≥4.0-blue?logo=gnu-bash)](#requisitos-del-sistema)
-[![python](https://img.shields.io/badge/python-≥3.8-blue?logo=python)](#dependencias)
-[![license](https://img.shields.io/badge/license-MIT-green)](#licencia)
-[![version](https://img.shields.io/badge/versión-2.4.0-orange)](#changelog)
+[![bash](https://img.shields.io/badge/bash-%E2%89%A54.0-blue?logo=gnu-bash)](#requisitos-del-sistema) [![python](https://img.shields.io/badge/python-%E2%89%A53.8-blue?logo=python)](#dependencias) [![license](https://img.shields.io/badge/license-MIT-green)](#licencia) [![version](https://img.shields.io/badge/versi%C3%B3n-2.5.0-orange)](#changelog)
 
-Pipeline operativo de descarga, procesamiento y validación estadística del pronóstico de calidad del aire producido por **WRF-Chem**, comparado contra observaciones horarias de la red **SINAICA/INECC**. Cubre **ocho zonas metropolitanas** del centro de México, evalúa **cuatro contaminantes** y está diseñado para ejecutarse de forma autónoma mediante crontab, publicando resultados en una página web estática actualizada cada día.
+Pipeline operativo de descarga, procesamiento y validación estadística del pronóstico de calidad del aire producido por **WRF-chem**, comparado contra observaciones horarias de la red **SINAICA/INECC**. Cubre **ocho zonas metropolitanas** del centro de México, evalúa **cuatro contaminantes** y está diseñado para ejecutarse de forma autónoma mediante crontab, publicando resultados en una página web estática actualizada cada día. Incluye además un módulo de **análisis mensual con diagramas de Taylor** para la evaluación agregada del desempeño del modelo.
 
 ---
 
@@ -18,6 +15,7 @@ Pipeline operativo de descarga, procesamiento y validación estadística del pro
 - [Instalación](#instalación)
 - [Configuración](#configuración)
 - [Uso](#uso)
+- [Diagramas de Taylor mensuales](#diagramas-de-taylor-mensuales)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Flujo de datos](#flujo-de-datos)
 - [Ciudades y contaminantes](#ciudades-y-contaminantes)
@@ -31,14 +29,15 @@ Pipeline operativo de descarga, procesamiento y validación estadística del pro
 
 ## Descripción
 
-El repositorio implementa dos modos de operación:
+El repositorio implementa tres modos de operación:
 
-| Modo | Script principal | Propósito |
-|------|-----------------|-----------|
-| **Operativo diario** | `evaluacion_diaria.sh` | Ejecutado por crontab; descarga, procesa y publica el análisis del día anterior en HTML. |
-| **Histórico mensual** | `01_extrae.py` | Procesamiento manual de un mes completo; genera reportes Word con Bootstrap. |
+| Modo                        | Script principal       | Propósito                                                                                |
+| ---------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| **Operativo diario**        | `evaluacion_diaria.sh` | Ejecutado por crontab; descarga, procesa y publica el análisis del día anterior en HTML. |
+| **Histórico mensual**       | `01_extrae.py`         | Procesamiento manual de un mes completo; genera reportes Word con Bootstrap.             |
+| **Diagnóstico estadístico** | `taylor_mensual.py`    | Genera diagramas de Taylor y un CSV de métricas resumidas por mes, ciudad, contaminante y horizonte, a partir de los CSV ya producidos en `combinado/ajustados/`. |
 
-A partir de la **v2.0.0** la descarga de observaciones se realiza íntegramente con `sinaica_descarga.sh` mediante HTTP directo al endpoint de SINAICA, eliminando la dependencia de R y el paquete `rsinaica`. Las versiones siguientes incorporaron correcciones de robustez, nuevas ciudades y el cuarto contaminante SO₂.
+A partir de la **v2.0.0** la descarga de observaciones se realiza íntegramente con `sinaica_descarga.sh` mediante HTTP directo al endpoint de SINAICA, eliminando la dependencia de R y el paquete `rsinaica`. Las versiones siguientes incorporaron correcciones de robustez, nuevas ciudades, el cuarto contaminante SO₂ y, en la **v2.5.0**, el módulo de diagramas de Taylor para análisis mensual.
 
 ---
 
@@ -88,17 +87,21 @@ A partir de la **v2.0.0** la descarga de observaciones se realiza íntegramente 
   generar_html.py        actualizar_indice.py
   web/YYYY/MM/           web/index.html
   evaluacion_YYYY-MM-DD.html
+               │
+               ▼  (acumulado mensual de combinado/ajustados/)
+  taylor_mensual.py
+  taylor_YYYY_MM.png + estadisticas_taylor.csv
 ```
 
 ### Horizontes de pronóstico evaluados
 
 Dado que cada run de WRF-Chem produce 72 h de pronóstico, el día de evaluación (`FECHA_EVAL = ayer`) está cubierto por tres runs distintos:
 
-| Variable | Fecha del run | Horizonte | Índices wrfout | Ventana local |
-|----------|--------------|-----------|----------------|---------------|
-| `RUN_D1` | Ayer | +24 h (día 1) | 6–29 | 00:00–23:00 (24 h) |
-| `RUN_D2` | Antier | +48 h (día 2) | 30–53 | 00:00–23:00 (24 h) |
-| `RUN_D3` | Antes de ayer | +72 h (día 3) | 54–71 | 00:00–17:00 (18 h) |
+| Variable | Fecha del run | Horizonte     | Índices wrfout | Ventana local      |
+| -------- | ------------- | ------------- | --------------- | -------------------- |
+| `RUN_D1` | Ayer          | +24 h (día 1) | 6–29            | 00:00–23:00 (24 h) |
+| `RUN_D2` | Antier        | +48 h (día 2) | 30–53           | 00:00–23:00 (24 h) |
+| `RUN_D3` | Antes de ayer | +72 h (día 3) | 54–71           | 00:00–17:00 (18 h) |
 
 El offset de 6 índices al inicio corresponde a UTC−6 (hora local del centro de México).
 
@@ -106,17 +109,19 @@ El offset de 6 índices al inicio corresponde a UTC−6 (hora local del centro d
 
 ## Requisitos del sistema
 
-| Componente | Versión mínima | Notas |
-|------------|---------------|-------|
-| bash | 4.0 | Arrays asociativos (`declare -A`) |
-| curl | 7.x | Peticiones HTTP a SINAICA |
-| python3 | 3.8 | Scripts de análisis y visualización |
-| awk, sort, sed | POSIX | Procesamiento de CSV en bash |
+| Componente     | Versión mínima | Notas                               |
+| --------------- | ----------------- | -------------------------------------- |
+| bash           | 4.0               | Arrays asociativos (`declare -A`)   |
+| curl           | 7.x               | Peticiones HTTP a SINAICA           |
+| python3        | 3.8               | Scripts de análisis y visualización |
+| awk, sort, sed | POSIX             | Procesamiento de CSV en bash        |
 
 > **macOS**: el bash instalado por defecto es la v3. Instalar `bash ≥ 4` con Homebrew:
-> ```bash
+>
+> ```
 > brew install bash
 > ```
+>
 > Luego apuntar el crontab a `/usr/local/bin/bash`.
 
 ---
@@ -125,7 +130,7 @@ El offset de 6 índices al inicio corresponde a UTC−6 (hora local del centro d
 
 ### Python
 
-```bash
+```
 pip install -r requirements.txt
 ```
 
@@ -137,15 +142,18 @@ netCDF4>=1.5
 pandas>=1.3
 numpy>=1.21
 matplotlib>=3.4
+scipy>=1.7
 python-docx>=0.8
 python-dateutil>=2.8
 ```
+
+> `scipy` se añadió en la v2.5.0 como dependencia de `taylor_mensual.py` (cálculo de la correlación de Pearson).
 
 ### Entorno reproducible (recomendado)
 
 **Con venv**:
 
-```bash
+```
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -153,14 +161,14 @@ pip install -r requirements.txt
 
 Configurar `PYTHON_BIN` en el entorno del crontab para apuntar al Python del venv:
 
-```cron
+```
 PYTHON_BIN=/opt/wrf/evaluacion/.venv/bin/python3
 0 7 * * * /opt/wrf/evaluacion/evaluacion_diaria.sh >> ...
 ```
 
 **Con conda**:
 
-```bash
+```
 conda create -n wrf-eval python=3.11
 conda activate wrf-eval
 pip install -r requirements.txt
@@ -174,7 +182,7 @@ A partir de la v2.0.0 **no se requiere R ni el paquete `rsinaica`**. La descarga
 
 ## Instalación
 
-```bash
+```
 # 1. Clonar el repositorio
 git clone https://github.com/JoseAgustin/ddsinaica.git
 cd ddsinaica
@@ -187,7 +195,7 @@ pip install -r requirements.txt
 # 3. Crear árbol de directorios de trabajo
 #    (evaluacion_diaria.sh lo hace automáticamente en la primera
 #     ejecución, pero se puede hacer manualmente para verificar permisos)
-mkdir -p conf observado modelo combinado/ajustados logs tmp web/css
+mkdir -p conf observado modelo combinado/ajustados logs tmp web/css resultados_taylor
 
 # 4. Dar permisos de ejecución a los scripts bash
 chmod +x evaluacion_diaria.sh sinaica_descarga.sh calidad_aire_pipeline.sh
@@ -204,12 +212,12 @@ export WRF_DIR=/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM
 
 ### Variables de entorno
 
-| Variable | Descripción | Valor por defecto |
-|----------|-------------|-------------------|
-| `EVALUACION_DIR` | Ruta absoluta del proyecto | Directorio del script |
-| `WRF_DIR` | Raíz de los wrfout de WRF-Chem | `/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM` |
-| `PYTHON_BIN` | Ejecutable Python | `python3` |
-| `SINAICA_TIPO` | Tipo de datos SINAICA | `""` = Crude (sin validar); `"V"` = Validado; `"M"` = Manual |
+| Variable          | Descripción                    | Valor por defecto                            |
+| ------------------ | -------------------------------- | ----------------------------------------------- |
+| `EVALUACION_DIR` | Ruta absoluta del proyecto     | Directorio del script                        |
+| `WRF_DIR`        | Raíz de los wrfout de WRF-Chem | `/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM` |
+| `PYTHON_BIN`     | Ejecutable Python              | `python3`                                    |
+| `SINAICA_TIPO`   | Tipo de datos SINAICA          | `""` = Crude (sin validar); `"V"` = Validado; `"M"` = Manual |
 
 ### Catálogo de estaciones (`conf/estaciones.conf`)
 
@@ -223,15 +231,15 @@ Archivo TSV con cinco columnas. El script genera una plantilla vacía en la prim
 442            Tula        SO2           Tula                  Univ. Tecnológica Tula Tepeji
 ```
 
-| Columna | Descripción |
-|---------|-------------|
-| `ESTACION_ID` | ID numérico de SINAICA (en la URL: `estacionId=XXX`) |
-| `CIUDAD_WRF` | Nombre interno del modelo (debe coincidir con `CIUDADES_WRF`) |
-| `CONT_SINAICA` | `O3`, `PM10`, `PM2.5` o `SO2` |
-| `NOMBRE_RED` | Nombre de la red SINAICA (informativo) |
-| `NOMBRE_ESTACION` | Nombre de la estación (informativo) |
+| Columna            | Descripción                                                   |
+| ------------------- | ---------------------------------------------------------------- |
+| `ESTACION_ID`     | ID numérico de SINAICA (en la URL: `estacionId=XXX`)         |
+| `CIUDAD_WRF`      | Nombre interno del modelo (debe coincidir con `CIUDADES_WRF`) |
+| `CONT_SINAICA`    | `O3`, `PM10`, `PM2.5` o `SO2`                                |
+| `NOMBRE_RED`      | Nombre de la red SINAICA (informativo)                        |
+| `NOMBRE_ESTACION` | Nombre de la estación (informativo)                           |
 
-Los IDs se obtienen en **https://sinaica.inecc.gob.mx** → Datos → buscar estación → el ID aparece en la URL (`estacionId=XXX`).
+Los IDs se obtienen en **<https://sinaica.inecc.gob.mx>** → Datos → buscar estación → el ID aparece en la URL (`estacionId=XXX`).
 
 El catálogo actual incluye **119 registros** en 44 estaciones verificadas de 8 ciudades (ver detalle en [Ciudades y contaminantes](#ciudades-y-contaminantes)).
 
@@ -241,18 +249,18 @@ El catálogo actual incluye **119 registros** en 44 estaciones verificadas de 8 
 
 ### Modo automático (crontab)
 
-```bash
+```
 # Evalúa el día anterior. Sin argumentos.
 bash evaluacion_diaria.sh
 ```
 
 **Instalación en crontab** (ejecutar a las 07:00 cada día):
 
-```bash
+```
 crontab -e
 ```
 
-```cron
+```
 # Variables de entorno para el pipeline
 EVALUACION_DIR=/opt/wrf/evaluacion
 WRF_DIR=/LUSTRE/OPERATIVO/EXTERNO-salidas/WRF-CHEM
@@ -261,11 +269,19 @@ PYTHON_BIN=/opt/wrf/evaluacion/.venv/bin/python3
 # Evaluación diaria con log rotativo por fecha
 0 7 * * * /opt/wrf/evaluacion/evaluacion_diaria.sh \
           >> /opt/wrf/evaluacion/logs/cron_$(date +\%Y\%m\%d).log 2>&1
+
+# Diagrama de Taylor del mes anterior, el día 1 de cada mes a las 08:00
+0 8 1 * * /opt/wrf/evaluacion/.venv/bin/python3 \
+          /opt/wrf/evaluacion/taylor_mensual.py \
+          --entrada /opt/wrf/evaluacion/combinado/ajustados \
+          --salida  /opt/wrf/evaluacion/resultados_taylor \
+          --mes $(date -d "last month" +\%Y-\%m) \
+          >> /opt/wrf/evaluacion/logs/taylor_$(date +\%Y\%m).log 2>&1
 ```
 
 ### Modo reproceso (fecha específica)
 
-```bash
+```
 # Reprocesar una fecha histórica
 bash evaluacion_diaria.sh 2026-02-15
 
@@ -278,7 +294,7 @@ En modo reproceso, si los CSV de SINAICA del día ya existen y tienen suficiente
 
 ### Descarga individual con `sinaica_descarga.sh`
 
-```bash
+```
 # O3 de la estación 249, un día, salida CSV
 bash sinaica_descarga.sh -e 249 -p O3 -f 2026-02-24 -r 1dia -c
 
@@ -294,7 +310,7 @@ bash sinaica_descarga.sh -h
 
 ### Verificar una ejecución
 
-```bash
+```
 # Resumen rápido del día
 grep -E "\[OK\]|\[WARN\]|\[ERROR\]" logs/evaluacion_$(date -d yesterday +%Y-%m-%d).log
 
@@ -308,6 +324,80 @@ bash evaluacion_diaria.sh $(date -d yesterday +%Y-%m-%d)
 
 ---
 
+## Diagramas de Taylor mensuales
+
+[`taylor_mensual.py`](taylor_mensual.py) consolida los CSV diarios producidos en `combinado/ajustados/` y genera, para cada mes, un diagrama de Taylor (Taylor, 2001, *JGR-Atmospheres*) más un resumen estadístico en CSV. Cada punto del diagrama representa una combinación única **Ciudad × Contaminante × Horizonte** (p. ej. *"Pachuca PM10 24h"*, *"Tula SO2 48h"*).
+
+### Entrada esperada
+
+```
+combinado/ajustados/eval_<CONT>_<Ciudad>_YYYY-MM-DD.csv
+```
+
+```
+Fecha,Ciudad,max_obs,mod_dia1,mod_dia2,mod_dia3
+2026-06-17,Pachuca,45.0617,11.7382,11.3944,13.6731
+```
+
+### Salidas por mes
+
+| Archivo                    | Contenido                                                    |
+| ---------------------------- | ----------------------------------------------------------------- |
+| `taylor_YYYY_MM.png`       | Diagrama de Taylor del mes (todas las ciudades por defecto) |
+| `estadisticas_taylor.csv`  | n, σ_obs, σ_mod, R, BIAS, RMSE, MAE, CRMSE, CRMSE normalizado, p-valor — por ciudad, contaminante y horizonte |
+
+### Metodología
+
+- **Eje radial**: desviación estándar normalizada del modelo, σ_mod / σ_obs.
+- **Ángulo θ**: arccos(R), con R = correlación de Pearson entre modelo y observaciones.
+- **CRMSE**: distancia del punto al punto de referencia (σ_obs/σ_obs = 1, θ = 0); CRMSE_n = √(r² + 1 − 2·r·R), con r = σ_mod/σ_obs.
+- **Referencia**: punto (1, 0) — representa observaciones perfectamente reproducidas.
+- Todos los valores se normalizan por σ_obs para poder comparar contaminantes con unidades distintas (ppbv vs µg/m³) en el mismo diagrama.
+
+### Uso básico
+
+```
+# Todos los meses disponibles, todas las ciudades
+python3 taylor_mensual.py --entrada combinado/ajustados --salida resultados_taylor
+
+# Solo un mes
+python3 taylor_mensual.py --entrada combinado/ajustados --salida resultados_taylor --mes 2026-04
+
+# Ayuda completa
+python3 taylor_mensual.py --help
+```
+
+### Selección de una o varias ciudades
+
+El argumento `--ciudades` (`-c`) acepta una o varias ciudades del catálogo del dominio WRF-Chem (`CDMX`, `Cuernavaca`, `Pachuca`, `Puebla`, `SJdelRio`, `Tlaxcala`, `Toluca`, `Tula`), separadas por espacio o coma. Si se omite, se incluyen todas.
+
+```
+# Una sola ciudad
+python3 taylor_mensual.py --entrada combinado/ajustados --salida resultados_taylor --ciudades Pachuca
+
+# Varias ciudades, separadas por espacio
+python3 taylor_mensual.py --entrada combinado/ajustados --salida resultados_taylor --ciudades Pachuca Tula CDMX
+
+# Varias ciudades, separadas por coma
+python3 taylor_mensual.py --entrada combinado/ajustados --salida resultados_taylor --ciudades "Pachuca,Tula,CDMX"
+```
+
+Cuando se aplica un filtro de ciudades, el PNG y el CSV de salida incluyen un sufijo con las ciudades seleccionadas (p. ej. `taylor_2026_06_Pachuca-Tula-CDMX.png`) para no mezclarse con corridas de "todas las ciudades". Una ciudad no reconocida (p. ej. `Monterrey`) aborta la ejecución con un mensaje de error indicando el catálogo válido.
+
+### Otros parámetros disponibles
+
+| Parámetro          | Descripción                                                  | Default                |
+| -------------------- | ---------------------------------------------------------------- | -------------------------- |
+| `--entrada, -i`    | Directorio con los CSV `eval_*.csv`                          | `combinado/ajustados` |
+| `--salida, -o`     | Directorio donde se escriben PNG y CSV                        | `.`                     |
+| `--mes, -m`        | Procesar solo un mes (`YYYY-MM`)                              | todos                   |
+| `--ciudades, -c`   | Una o varias ciudades a incluir                                | todas                   |
+| `--min-pares, -p`  | Mínimo de pares obs/modelo válidos por serie para incluirse | `5`                     |
+| `--max-radio, -r`  | Radio máximo del diagrama, en unidades normalizadas           | `1.65`                  |
+| `--dpi`            | Resolución de los PNG                                         | `150`                   |
+
+---
+
 ## Estructura del repositorio
 
 ```
@@ -317,6 +407,7 @@ ddsinaica/
 ├── sinaica_descarga.sh           # Descarga HTTP directa de SINAICA
 ├── calidad_aire_pipeline.sh      # Separación y consolidación de observaciones
 ├── 01_extrae.py                  # Pipeline histórico mensual (modo manual)
+├── taylor_mensual.py             # Diagramas de Taylor mensuales (Ciudad × Cont × Horizonte)
 ├── requirements.txt              # Dependencias Python
 │
 ├── conf/
@@ -334,7 +425,11 @@ ddsinaica/
 ├── combinado/
 │   ├── combinado_CDMX_O3.csv     # Obs + modelo sin ajuste
 │   └── ajustados/
-│       └── eval_o3_CDMX_YYYY-MM-DD.csv
+│       └── eval_<CONT>_<Ciudad>_YYYY-MM-DD.csv
+│
+├── resultados_taylor/            # Salidas de taylor_mensual.py
+│   ├── taylor_YYYY_MM.png
+│   └── estadisticas_taylor.csv
 │
 ├── logs/
 │   └── evaluacion_YYYY-MM-DD.log
@@ -363,7 +458,7 @@ ddsinaica/
 
 ## Flujo de datos
 
-```mermaid
+```
 flowchart TD
     A[conf/estaciones.conf] -->|IDs de estaciones| B[sinaica_descarga.sh]
     B -->|CSV crudo por estación| C[Normalización awk]
@@ -380,6 +475,10 @@ flowchart TD
     K -->|evaluacion_YYYY-MM-DD.html| L[web/YYYY/MM/]
     L --> M[actualizar_indice.py]
     M --> N[web/index.html]
+
+    I -->|acumulado mensual| O[taylor_mensual.py]
+    O -->|taylor_YYYY_MM.png| P[resultados_taylor/]
+    O -->|estadisticas_taylor.csv| P
 ```
 
 ---
@@ -388,50 +487,50 @@ flowchart TD
 
 ### Dominio WRF-Chem
 
-| Ciudad (modelo) | Emoji | Red SINAICA | Lat S | Lat N | Lon O | Lon E | Estaciones |
-|-----------------|:-----:|-------------|------:|------:|------:|------:|:----------:|
-| CDMX | 🏙️ | Valle de México | 19.20 | 19.70 | −99.30 | −98.85 | 23 |
-| Toluca | 🏔️ | Toluca | 19.23 | 19.39 | −99.72 | −99.50 | 5 |
-| Puebla | ⛩️ | Puebla | 18.95 | 19.12 | −98.32 | −98.10 | 5 |
-| Tlaxcala | 🌾 | Tlaxcala | 19.29 | 19.36 | −98.26 | −98.15 | 1 |
-| Pachuca | ⛏️ | Pachuca / Mineral de la Reforma | 20.03 | 20.13 | −98.80 | −98.67 | 3 |
-| Cuernavaca | 🌺 | Cuernavaca | 18.89 | 18.98 | −99.26 | −99.14 | 1 |
-| SJdelRio | 🌊 | San Juan del Río | 20.36 | 20.41 | −100.01 | −99.93 | 1 |
-| Tula | 🏭 | Tula / Tepeji / Atitalaquia / Atotonilco | 19.89 | 20.18 | −99.44 | −99.09 | 5 |
+| Ciudad (modelo) | Emoji | Red SINAICA                              | Lat S | Lat N | Lon O   | Lon E  | Estaciones |
+| ----------------- | ------- | ------------------------------------------- | ------- | ------- | --------- | -------- | ------------ |
+| CDMX             | 🏙️    | Valle de México                          | 19.20 | 19.70 | −99.30  | −98.85 | 23         |
+| Toluca           | 🏔️    | Toluca                                   | 19.23 | 19.39 | −99.72  | −99.50 | 5          |
+| Puebla           | ⛩️    | Puebla                                   | 18.95 | 19.12 | −98.32  | −98.10 | 5          |
+| Tlaxcala         | 🌾     | Tlaxcala                                 | 19.29 | 19.36 | −98.26  | −98.15 | 1          |
+| Pachuca          | ⛏️    | Pachuca / Mineral de la Reforma          | 20.03 | 20.13 | −98.80  | −98.67 | 3          |
+| Cuernavaca       | 🌺     | Cuernavaca                               | 18.89 | 18.98 | −99.26  | −99.14 | 1          |
+| SJdelRio         | 🌊     | San Juan del Río                         | 20.36 | 20.41 | −100.01 | −99.93 | 1          |
+| Tula             | 🏭     | Tula / Tepeji / Atitalaquia / Atotonilco | 19.89 | 20.18 | −99.44  | −99.09 | 5          |
 
 ### Contaminantes y umbrales normativos
 
-| Contaminante | Clave modelo | Unidades | Unidades observado | Factor conv. obs | Umbral | Norma |
-|-------------|:------------:|:--------:|:-----------------:|:----------------:|-------:|-------|
-| Ozono | `o3` | ppbv | ppmv | × 1 000 | 135 ppbv | NOM-020-SSA1 |
-| PM10 | `PM10` | µg/m³ | µg/m³ | × 1 | 75 µg/m³ | NOM-025-SSA1-2021 |
-| PM2.5 | `PM25` | µg/m³ | µg/m³ | × 1 | 45 µg/m³ | NOM-025-SSA1-2021 |
-| Dióxido de azufre | `SO2` | ppbv | ppmv | × 1 000 | 130 ppbv | NOM-022-SSA1-2010 |
+| Contaminante      | Clave modelo | Unidades | Unidades observado | Factor conv. obs | Umbral   | Norma             |
+| ------------------- | -------------- | ---------- | --------------------- | ------------------- | ---------- | ------------------- |
+| Ozono             | `o3`         | ppbv     | ppmv                | × 1 000          | 135 ppbv | NOM-020-SSA1      |
+| PM10              | `PM10`       | µg/m³    | µg/m³               | × 1               | 75 µg/m³ | NOM-025-SSA1-2021 |
+| PM2.5             | `PM25`       | µg/m³    | µg/m³               | × 1               | 45 µg/m³ | NOM-025-SSA1-2021 |
+| Dióxido de azufre | `SO2`        | ppbv     | ppmv                | × 1 000          | 130 ppbv | NOM-022-SSA1-2010 |
 
 **Extracción desde wrfout:**
 
 O₃ y SO₂ se extraen de `bottom_top=0` (capa superficial) y se convierten de ppmv a ppbv multiplicando × 1 000. El valor reportado es el **máximo espacial del máximo temporal** en la ventana del horizonte. PM10 y PM2.5 se calculan como el **promedio temporal del máximo espacial**. El script busca las siguientes variables en el netCDF:
 
-| Contaminante | Nombres buscados en wrfout |
-|-------------|---------------------------|
-| SO₂ | `so2` (CB05), `SO2` (SAPRC99), `so2_a` (CB05+aerosol) |
-| PM10 | `PM10`, `pm10` |
-| PM2.5 | `PM2_5_DRY`, `PM2_5`, `pm2_5_dry`, `pm2_5` |
+| Contaminante | Nombres buscados en wrfout                            |
+| -------------- | --------------------------------------------------------- |
+| SO₂          | `so2` (CB05), `SO2` (SAPRC99), `so2_a` (CB05+aerosol) |
+| PM10         | `PM10`, `pm10`                                        |
+| PM2.5        | `PM2_5_DRY`, `PM2_5`, `pm2_5_dry`, `pm2_5`            |
 
 Si ningún nombre está presente en el archivo, el valor se registra como `NaN` con advertencia `[EXTRACT]` en el log.
 
 ### Disponibilidad de contaminantes por ciudad
 
-| Ciudad | O₃ | PM10 | PM2.5 | SO₂ |
-|--------|:--:|:----:|:-----:|:---:|
-| CDMX | ✓ | ✓ | ✓ | — |
-| Toluca | ✓ | ✓ | ✓ | — |
-| Puebla | ✓ | ✓ | ✓ | — |
-| Tlaxcala | ✓ | ✓ | ✓ | — |
-| Pachuca | ✓ | ✓ | ✓ | — |
-| Cuernavaca | ✓ | ✓ | ✓ | — |
-| SJdelRio | ✓ | — | ✓ | — |
-| Tula | ✓ | ✓ | ✓ | ✓ |
+| Ciudad     | O₃ | PM10 | PM2.5 | SO₂ |
+| ------------ | ---- | ------ | ------- | ----- |
+| CDMX       | ✓  | ✓    | ✓     | —   |
+| Toluca     | ✓  | ✓    | ✓     | —   |
+| Puebla     | ✓  | ✓    | ✓     | —   |
+| Tlaxcala   | ✓  | ✓    | ✓     | —   |
+| Pachuca    | ✓  | ✓    | ✓     | —   |
+| Cuernavaca | ✓  | ✓    | ✓     | —   |
+| SJdelRio   | ✓  | —    | ✓     | —   |
+| Tula       | ✓  | ✓    | ✓     | ✓   |
 
 SO₂ se monitorea activamente en Tula por ser la zona con mayor concentración de fuentes primarias del dominio: la refinería Miguel Hidalgo (Pemex) y la central termoeléctrica Francisco Pérez Ríos (CFE). Para las demás ciudades, SINAICA devuelve array vacío y el registro se omite sin generar error en el pipeline.
 
@@ -439,38 +538,39 @@ SO₂ se monitorea activamente en Tula por ser la zona con mayor concentración 
 
 ## Métricas de validación
 
-Calculadas sobre una ventana deslizante de **30 días** para los tres horizontes de pronóstico.
+Calculadas sobre una ventana deslizante de **30 días** para los tres horizontes de pronóstico en el reporte diario (`stats_dia.py`); el módulo de [diagramas de Taylor](#diagramas-de-taylor-mensuales) calcula las mismas métricas continuas (más CRMSE) de forma acumulada para el mes completo.
 
 ### Continuas
 
-| Métrica | Fórmula | Descripción |
-|---------|---------|-------------|
-| BIAS | mean(mod − obs) | Sesgo sistemático |
-| RMSE | √mean((mod − obs)²) | Error cuadrático medio |
-| MAE | mean(\|mod − obs\|) | Error absoluto medio |
-| R | Pearson | Coeficiente de correlación |
+| Métrica | Fórmula             | Descripción                |
+| --------- | ---------------------- | ----------------------------- |
+| BIAS    | mean(mod − obs)     | Sesgo sistemático          |
+| RMSE    | √mean((mod − obs)²) | Error cuadrático medio     |
+| MAE     | mean(\|mod − obs\|) | Error absoluto medio       |
+| R       | Pearson             | Coeficiente de correlación |
+| CRMSE   | √(σ_mod² + σ_obs² − 2·σ_mod·σ_obs·R) | RMSE centrado (componente usada en el diagrama de Taylor) |
 
 ### Dicotómicas (tabla de contingencia 2×2)
 
 Cada día se clasifica como evento (valor ≥ umbral normativo) o no-evento.
 
-| Métrica | Fórmula | Descripción |
-|---------|---------|-------------|
-| POD | H / (H + M) | Probabilidad de detección |
-| FAR | F / (H + F) | Tasa de falsas alarmas |
-| CSI | H / (H + M + F) | Índice de éxito crítico |
-| TSS | POD − POFD | Pierce Skill Score |
-| PC | (H + C) / N | Porcentaje correcto |
+| Métrica | Fórmula         | Descripción               |
+| --------- | ----------------- | ---------------------------- |
+| POD     | H / (H + M)     | Probabilidad de detección |
+| FAR     | F / (H + F)     | Tasa de falsas alarmas    |
+| CSI     | H / (H + M + F) | Índice de éxito crítico   |
+| TSS     | POD − POFD      | Pierce Skill Score        |
+| PC      | (H + C) / N     | Porcentaje correcto       |
 
 H = acierto, M = fallo, F = falsa alarma, C = rechazo correcto, N = total.
 
 ### Semáforo visual en la página HTML
 
-| Color | Criterio BIAS | Criterio R |
-|-------|:------------:|:----------:|
-| 🟢 Verde | \|BIAS\| < 10 | R ≥ 0.7 |
+| Color   | Criterio BIAS      | Criterio R    |
+| --------- | --------------------- | --------------- |
+| 🟢 Verde | \|BIAS\| < 10      | R ≥ 0.7       |
 | 🟡 Ámbar | 10 ≤ \|BIAS\| < 25 | 0.4 ≤ R < 0.7 |
-| 🔴 Rojo | \|BIAS\| ≥ 25 | R < 0.4 |
+| 🔴 Rojo  | \|BIAS\| ≥ 25      | R < 0.4       |
 
 La página HTML generada presenta los resultados en pestañas por contaminante (O₃ · PM10 · PM2.5 · SO₂) y por horizonte de pronóstico (+24 h · +48 h · +72 h), con gráficas de serie de tiempo y tablas de métricas continuas y dicotómicas.
 
@@ -482,16 +582,19 @@ La página HTML generada presenta los resultados en pestañas por contaminante (
 
 El pipeline está diseñado para ser **tolerante a fallos parciales**: si un componente no está disponible, el proceso continúa con los datos existentes y registra la advertencia en el log.
 
-| Situación | Comportamiento |
-|-----------|---------------|
-| 0 de 3 wrfout disponibles | **Aborta** con código 1 (fallo crítico) |
-| 1 ó 2 de 3 wrfout disponibles | Continúa; rellena con `NA` los horizontes faltantes |
-| Descarga SINAICA fallida tras 3 reintentos | Advertencia en log; continúa con observaciones previas en `observado/` |
-| CSV con menos de 18 registros horarios | Se descarta y se registra como inválido |
-| Variable del contaminante ausente en wrfout | `NaN` con advertencia `[EXTRACT]`; otros contaminantes continúan |
-| API SINAICA retorna > 24 registros para `rango=1dia` | Recorte automático al día máximo con aviso `[TRIM]` en stderr |
-| Error en extracción Python | Advertencia en log; los demás horizontes continúan |
-| Error en generación HTML | Advertencia; el índice histórico se actualiza igualmente |
+| Situación                                              | Comportamiento                                                         |
+| --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| 0 de 3 wrfout disponibles                              | **Aborta** con código 1 (fallo crítico)                                |
+| 1 ó 2 de 3 wrfout disponibles                          | Continúa; rellena con `NA` los horizontes faltantes                    |
+| Descarga SINAICA fallida tras 3 reintentos             | Advertencia en log; continúa con observaciones previas en `observado/` |
+| CSV con menos de 18 registros horarios                 | Se descarta y se registra como inválido                                |
+| Variable del contaminante ausente en wrfout            | `NaN` con advertencia `[EXTRACT]`; otros contaminantes continúan       |
+| API SINAICA retorna > 24 registros para `rango=1dia`  | Recorte automático al día máximo con aviso `[TRIM]` en stderr          |
+| Error en extracción Python                             | Advertencia en log; los demás horizontes continúan                     |
+| Error en generación HTML                               | Advertencia; el índice histórico se actualiza igualmente               |
+| CSV `eval_*.csv` con nombre no reconocido              | `taylor_mensual.py` lo omite con advertencia, sin detener la ejecución |
+| Serie con menos de `--min-pares` pares obs/modelo      | `taylor_mensual.py` omite esa combinación Ciudad×Cont×Horizonte         |
+| Ciudad solicitada con `--ciudades` no está en el catálogo | `taylor_mensual.py` aborta indicando las ciudades válidas           |
 
 ### Interpretación del log
 
@@ -506,7 +609,7 @@ El pipeline está diseñado para ser **tolerante a fallos parciales**: si un com
 
 ### Verificar la salida del crontab
 
-```bash
+```
 # Resumen rápido del día
 grep -E "\[OK\]|\[WARN\]|\[ERROR\]" logs/evaluacion_$(date -d yesterday +%Y-%m-%d).log
 
@@ -522,16 +625,17 @@ test -f web/$(date -d yesterday +%Y)/$(date -d yesterday +%m)/evaluacion_$(date 
 
 ## Changelog
 
-| Versión | Cambios principales |
-|---------|-------------------|
-| **v2.4.0** | SO₂ como cuarto contaminante: `UMBRAL[SO2]=130 ppbv` (NOM-022-SSA1-2010); `VARS_GAS` en `extract_dia.py`; conversión ppmv→ppbv; 5 estaciones SO₂ en Tula; cuarta pestaña en la página HTML; `calidad_aire_pipeline.sh` actualizado. |
-| **v2.3.0** | Nueva ciudad **Tula de Allende** con bbox y 5 estaciones verificadas (IDs 442, 87, 502, 82, 83). Nueva estación **Mineral de la Reforma** (ID=495) en Pachuca. Catálogo completo: 119 registros en 44 estaciones. |
-| **v2.2.0** | Corrección `CIUDAD_OBS_MAP[CDMX]`: `"Valle_de_Mexico"` → `"CDMX"`. Catálogo completo de 96 estaciones sin IDs de marcador (999). |
+| Versión    | Cambios principales                                                                                                                                                                                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **v2.5.0** | Nuevo módulo `taylor_mensual.py`: genera diagramas de Taylor mensuales (`taylor_YYYY_MM.png`) y un resumen estadístico acumulado (`estadisticas_taylor.csv`) por combinación Ciudad×Contaminante×Horizonte, a partir de los CSV de `combinado/ajustados/`. Incluye filtro opcional `--ciudades` para una o varias ciudades del dominio, con validación contra el catálogo oficial y nombres de salida con sufijo cuando se filtra. Nueva dependencia: `scipy`. |
+| **v2.4.0** | SO₂ como cuarto contaminante: `UMBRAL[SO2]=130 ppbv` (NOM-022-SSA1-2010); `VARS_GAS` en `extract_dia.py`; conversión ppmv→ppbv; 5 estaciones SO₂ en Tula; cuarta pestaña en la página HTML; `calidad_aire_pipeline.sh` actualizado.                                                                                                 |
+| **v2.3.0** | Nueva ciudad **Tula de Allende** con bbox y 5 estaciones verificadas (IDs 442, 87, 502, 82, 83). Nueva estación **Mineral de la Reforma** (ID=495) en Pachuca. Catálogo completo: 119 registros en 44 estaciones.                                                                                                                   |
+| **v2.2.0** | Corrección `CIUDAD_OBS_MAP[CDMX]`: `"Valle_de_Mexico"` → `"CDMX"`. Catálogo completo de 96 estaciones sin IDs de marcador (999).                                                                                                                                                                                                    |
 | **v2.1.0** | Tres correcciones en `combinar_dia.py`: detección automática del formato de fecha del consolidado (YYYYMMDD vs YYYY-MM-DD), conversión ppmv→ppbv del O₃ observado, y comparación de fechas robusta con `pd.Timestamp`. Filtro `[TRIM]` en `sinaica_descarga.sh` para respuestas con > 24 registros. Sección descriptiva en el HTML. |
-| **v2.0.0** | Eliminación de R y `rsinaica`; descarga directa con `sinaica_descarga.sh` vía HTTP POST a SINAICA. |
-| **v1.0.0** | Versión inicial con 7 ciudades y descarga vía R/rsinaica. |
+| **v2.0.0** | Eliminación de R y `rsinaica`; descarga directa con `sinaica_descarga.sh` vía HTTP POST a SINAICA.                                                                                                                                                                                                                                  |
+| **v1.0.0** | Versión inicial con 7 ciudades y descarga vía R/rsinaica.                                                                                                                                                                                                                                                                           |
 
-El historial detallado está en [RELEASE_NOTES.md](RELEASE_NOTES.md).
+El historial detallado está en [RELEASE_NOTES.md](https://github.com/JoseAgustin/ddsinaica/blob/main/RELEASE_NOTES.md).
 
 ---
 
@@ -549,6 +653,7 @@ Las contribuciones son bienvenidas. Por favor seguir el siguiente flujo:
 ### Reporte de errores
 
 Abrir un Issue en GitHub incluyendo:
+
 - La fecha de ejecución que falló
 - Las últimas 50 líneas del log correspondiente (`tail -50 logs/evaluacion_<fecha>.log`)
 - Salida de `bash --version` y `python3 --version`
@@ -557,7 +662,7 @@ Abrir un Issue en GitHub incluyendo:
 
 ## Licencia
 
-MIT License — ver archivo [LICENSE](LICENSE).
+MIT License — ver archivo [LICENSE](https://github.com/JoseAgustin/ddsinaica/blob/main/LICENSE).
 
 ```
 Copyright (c) 2026  Pipeline WRF-Chem / Red de Calidad del Aire — Centro de México
