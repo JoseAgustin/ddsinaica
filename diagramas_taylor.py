@@ -5,7 +5,7 @@
 # =============================================================================
 """
 Genera diagramas de Taylor mensuales a partir de datos_diarios.csv
-producido por extrae_evaluacion_html.sh.
+producido por extrae_masivo.sh.
 
 Cada punto del diagrama representa una combinación única de:
     Ubicación + Contaminante + Horizonte
