@@ -473,86 +473,45 @@ ddsinaica/
 
 ## Flujo de datos
 
-```
- ╔══════════════════════════╗
- ║   conf/estaciones.conf   ║
- ╚══════════════════════════╝
-              ║
-            (IDs)
-              ▼
- ╔══════════════════════════╗
- ║    sinaica_descarga.sh   ║
- ╚══════════════════════════╝
-              ║
-         (CSV crudo)
-              ▼
- ╔══════════════════════════╗
- ║    Normalización awk     ║
- ╚══════════════════════════╝
-              ║
-              ▼
- ╔══════════════════════════╗
- ║ calidad_aire_pipeline.sh ║
- ╚══════════════════════════╝
-              ║
-     (*_consolidado.csv)
-              ▼                             ╔════════════════════════════╗
- ╔══════════════════════════╗               ║ LUSTRE / wrfout x 3 fechas ║
- ║        observado/        ║               ╚════════════════════════════╝
- ╚══════════════════════════╝                              ║
-              ║                                            ▼
-              ║                             ╔════════════════════════════╗
-              ║                             ║       extract_dia.py       ║
-              ║                             ╚════════════════════════════╝
-              ║                                            ║
-              ║                                       (ext_*.csv)
-              ║                                            ║
-              ╚═════════════════════╦══════════════════════╝
-                                    ║
-                                    ▼
-                        ╔════════════════════════╗
-                        ║    combinar_dia.py     ║
-                        ╚════════════════════════╝
-                                    ║
-                               (eval_*.csv)
-                                    ║
-                                    ▼
-                        ╔════════════════════════╗
-                        ║  combinado/ajustados/  ║
-                        ╚════════════════════════╝
-                                    ║
-       ╔════════════════════════════╬════════════════════════════╗
-       ║                            ║                            ║
-       ║ (diario)                   ║ (acumulado                 ║ (acumulado
-       ║                            ║  mensual)                  ║  mensual)
-       ▼                            ▼                            ▼
-╔══════════════╗           ╔═══════════════════╗       ╔════════════════════════╗
-║ stats_dia.py ║           ║ taylor_mensual.py ║       ║ informe_dicotomico.py  ║
-╚══════════════╝           ╚═══════════════════╝       ╚════════════════════════╝
-       ║                            ╠─► (taylor_YYYY_MM.png)      ╠──► (informe_dicotomico_
-(stats_YYYY-MM-DD.json)             ╠─► (estadisticas_taylor.csv) ║      YYYY_MM.docx)
-       ║                            ║                             ╠──► (dicotomico_stats.csv)
-       ▼                            ▼                             ▼
-╔═════════════════╗        ╔═══════════════════╗       ╔════════════════════════╗
-║ generar_html.py ║        ║ resultados_taylor/║       ║ informes_dicotomicos/  ║
-╚═════════════════╝        ╚═══════════════════╝       ╚════════════════════════╝
-       ║
-       ▼
-╔═════════════════╗
-║   web/YYYY/MM/  ║
-╚═════════════════╝
-       ║
-       ▼
-╔══════════════════════╗
-║ actualizar_indice.py ║
-╚══════════════════════╝
-       ║
-       ▼
-╔═════════════════╗
-║  web/index.html ║
-╚═════════════════╝
-```
+```mermaid
+graph TD
+    %% Estilos de los nodos
+    classDef config fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef script fill:#d4edda,stroke:#28a745,stroke-width:2px;
+    classDef folder fill:#cce5ff,stroke:#007bff,stroke-width:2px;
+    classDef model fill:#fff3cd,stroke:#ffc107,stroke-width:2px;
 
+    %% Nodos principales (Ramas de origen)
+    A[conf/estaciones.conf]:::config -->|IDs| B(sinaica_descarga.sh):::script
+    B -->|CSV crudo| C(Normalización awk):::script
+    C --> D(calidad_aire_pipeline.sh):::script
+    D -->|*_consolidado.csv| E[(observado/)]:::folder
+
+    F[LUSTRE / wrfout × 3 fechas]:::model --> G(extract_dia.py):::script
+    G -->|ext_*.csv| H(combinar_dia.py):::script
+    E --> H
+
+    %% Combinación
+    H -->|eval_*.csv| I[(combinado/ajustados/)]:::folder
+
+    %% Derivaciones
+    I -->|diario| J(stats_dia.py):::script
+    I -->|acumulado mensual| O(taylor_mensual.py):::script
+    I -->|acumulado mensual| Q(informe_dicotomico.py):::script
+
+    %% Salidas de evaluación diaria
+    J -->|stats_YYYY-MM-DD.json| K(generar_html.py):::script
+    K --> L[(web/YYYY/MM/)]:::folder
+    L --> M(actualizar_indice.py):::script
+    M --> N[web/index.html]:::config
+
+    %% Salidas de reportes mensuales
+    O -->|taylor_YYYY_MM.png| P[(resultados_taylor/)]:::folder
+    O -->|estadisticas_taylor.csv| P
+    
+    Q -->|informe_dicotomico_YYYY_MM.docx| R[(informes_dicotomicos/)]:::folder
+    Q -->|dicotomico_stats.csv| R
+```
 ---
 
 ## Ciudades y contaminantes
