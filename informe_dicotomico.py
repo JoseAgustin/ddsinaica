@@ -5,7 +5,8 @@ informe_dicotomico.py
 =====================
 Calcula estadísticos dicotómicos mensuales (POD, FAR, CSI, TSS, PC, BIAS_DICHO)
 a partir de los CSV diarios de `combinado/ajustados/` y genera un documento
-Word (.docx) con los resultados organizados por contaminante y ciudad.
+Word (.docx) con los resultados organizados por contaminante y ciudad utilizando
+exclusivamente `python-docx` con tablas autoajustadas a la ventana.
 
 Contaminantes evaluados y umbrales normativos:
     O3   — 135 ppbv        (NOM-020-SSA1)
@@ -14,15 +15,15 @@ Contaminantes evaluados y umbrales normativos:
     SO2  — 130 ppbv        (NOM-022-SSA1-2010)
 
 Estadísticos de la tabla de contingencia 2×2 (evento = valor ≥ umbral):
-    H  — acierto       (obs evento,  mod evento)
-    M  — fallo         (obs evento,  mod no-evento)
-    F  — falsa alarma  (obs no-evento, mod evento)
+    H  — acierto          (obs evento,    mod evento)
+    M  — fallo            (obs evento,    mod no-evento)
+    F  — falsa alarma     (obs no-evento, mod evento)
     C  — rechazo correcto (obs no-evento, mod no-evento)
 
     POD  = H / (H + M)          Probabilidad de detección
     FAR  = F / (H + F)          Tasa de falsas alarmas
     CSI  = H / (H + M + F)      Índice de éxito crítico (Threat Score)
-    TSS  = H/(H+M) − F/(F+C)   Pierce Skill Score  (Hanssen-Kuipers discriminant)
+    TSS  = H/(H+M) − F/(F+C)    Pierce Skill Score  (Hanssen-Kuipers discriminant)
     PC   = (H + C) / N          Porcentaje correcto (Percent Correct)
     BIAS = (H + F) / (H + M)    Sesgo de frecuencia (Frequency Bias)
 
@@ -38,32 +39,38 @@ Uso:
     python3 informe_dicotomico.py --help
 
 Dependencias:
-    pip install pandas numpy
-    npm (docx preinstalado)
+    pip install pandas numpy python-docx
 
 Autor  : Pipeline ddsinaica / WRF-Chem — ICAyCC, UNAM
-Versión: 1.0.0 (2026-07)
+Versión: 2.1.0 (2026-07) — Tablas autoajustadas a la ventana
 """
 
 import argparse
-import json
+import glob
 import os
 import re
-import subprocess
 import sys
-import tempfile
-import warnings
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+# Dependencias de python-docx
+import docx
+from docx import Document
+from docx.enum.section import WD_ORIENT
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
+from docx.shared import Inches, Pt, RGBColor
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURACIÓN GLOBAL
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Umbrales normativos por contaminante
 UMBRALES = {
     "O3":   135.0,   # ppbv      NOM-020-SSA1
     "PM10": 75.0,    # µg/m³     NOM-025-SSA1-2021
@@ -71,7 +78,6 @@ UMBRALES = {
     "SO2":  130.0,   # ppbv      NOM-022-SSA1-2010
 }
 
-# Unidades, nombres completos y citas normativas
 META_CONT = {
     "O3": {
         "nombre":  "Ozono (O₃)",
@@ -117,30 +123,32 @@ META_CONT = {
             "de combustibles fósiles con alto contenido de azufre (refinación de "
             "petróleo, centrales termoeléctricas). Produce irritación de las vías "
             "respiratorias superiores y contribuye a la formación de lluvia ácida. "
-            "Umbral: 130 ppbv en promedio de 24 h (NOM-022-SSA1-2010, equivalente "
-            "a 0.13 ppm)."
+            "Umbral: 130 ppbv en promedio de 24 h (NOM-022-SSA1-2010)."
         ),
     },
 }
 
-# Catálogo oficial de ciudades del dominio
 CIUDADES_DOMINIO = [
     "CDMX", "Cuernavaca", "Pachuca", "Puebla",
     "SJdelRio", "Tlaxcala", "Toluca", "Tula",
 ]
 _CIUDADES_NORM = {c.lower(): c for c in CIUDADES_DOMINIO}
 _CIUDADES_NORM.update({
-    "sjdelrio":           "SJdelRio",
-    "san juan del rio":   "SJdelRio",
-    "cdmx":               "CDMX",
-    "ciudad de mexico":   "CDMX",
+    "sjdelrio":         "SJdelRio",
+    "san juan del rio": "SJdelRio",
+    "cdmx":             "CDMX",
+    "ciudad de mexico": "CDMX",
 })
 
-# Horizontes de pronóstico
 HORIZONTES = {"mod_dia1": "+24 h", "mod_dia2": "+48 h", "mod_dia3": "+72 h"}
-
-# Mínimo de días con datos (H+M+F+C) para calcular estadísticos
 MIN_DIAS = 5
+
+_NOMBRE_MES = {
+    "01": "Enero",   "02": "Febrero",  "03": "Marzo",
+    "04": "Abril",   "05": "Mayo",     "06": "Junio",
+    "07": "Julio",   "08": "Agosto",   "09": "Septiembre",
+    "10": "Octubre", "11": "Noviembre","12": "Diciembre",
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -176,7 +184,6 @@ def parsear_lista_ciudades(valor) -> list[str] | None:
 
 
 def parsear_nombre_archivo(ruta: str):
-    """Extrae (contaminante, ciudad) de eval_<CONT>_<Ciudad>_YYYY-MM-DD.csv"""
     nombre = Path(ruta).stem
     m = re.match(r"^eval_([A-Za-z0-9]+)_(.+)_\d{4}-\d{2}-\d{2}$", nombre)
     if not m:
@@ -186,27 +193,49 @@ def parsear_nombre_archivo(ruta: str):
     return cont, ciudad
 
 
+def _fmt(val, decimals=3) -> str:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return "N/D"
+    return f"{val:.{decimals}f}"
+
+
+# Colores semáforo
+def bg_pod(v):
+    if v is None: return "E8E8E8"
+    return "C6EFCE" if v >= 0.7 else ("FFEB9C" if v >= 0.4 else "FFC7CE")
+
+def bg_far(v):
+    if v is None: return "E8E8E8"
+    return "C6EFCE" if v <= 0.3 else ("FFEB9C" if v <= 0.5 else "FFC7CE")
+
+def bg_csi(v):
+    if v is None: return "E8E8E8"
+    return "C6EFCE" if v >= 0.4 else ("FFEB9C" if v >= 0.2 else "FFC7CE")
+
+def bg_tss(v):
+    if v is None: return "E8E8E8"
+    return "C6EFCE" if v >= 0.4 else ("FFEB9C" if v >= 0.1 else "FFC7CE")
+
+def bg_bias(v):
+    if v is None: return "E8E8E8"
+    b = abs(v - 1.0)
+    return "C6EFCE" if b <= 0.3 else ("FFEB9C" if b <= 0.6 else "FFC7CE")
+
+BG_FN = {
+    "POD": bg_pod, "FAR": bg_far, "CSI": bg_csi,
+    "TSS": bg_tss, "PC": lambda v: "FFFFFF", "BIAS": bg_bias
+}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# CÁLCULO DE ESTADÍSTICOS DICOTÓMICOS
+# CÁLCULO DE ESTADÍSTICOS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def contingencia(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict:
-    """
-    Construye la tabla de contingencia 2×2 y calcula todos los
-    estadísticos dicotómicos.
-
-    Parámetros
-    ----------
-    obs, mod : arrays de igual longitud con valores diarios.
-    umbral   : valor de referencia normativo (mismo umbral para obs y mod).
-
-    Retorna dict con H, M, F, C, N, POD, FAR, CSI, TSS, PC, BIAS_FREQ,
-    o None si N < MIN_DIAS.
-    """
-    mask  = np.isfinite(obs) & np.isfinite(mod)
-    obs   = obs[mask]
-    mod   = mod[mask]
-    N     = len(obs)
+def contingencia(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict | None:
+    mask = np.isfinite(obs) & np.isfinite(mod)
+    obs  = obs[mask]
+    mod  = mod[mask]
+    N    = len(obs)
 
     if N < MIN_DIAS:
         return None
@@ -214,10 +243,10 @@ def contingencia(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict:
     obs_ev = obs >= umbral
     mod_ev = mod >= umbral
 
-    H = int(np.sum( obs_ev &  mod_ev))   # acierto
-    M = int(np.sum( obs_ev & ~mod_ev))   # fallo
-    F = int(np.sum(~obs_ev &  mod_ev))   # falsa alarma
-    C = int(np.sum(~obs_ev & ~mod_ev))   # rechazo correcto
+    H = int(np.sum( obs_ev &  mod_ev))
+    M = int(np.sum( obs_ev & ~mod_ev))
+    F = int(np.sum(~obs_ev &  mod_ev))
+    C = int(np.sum(~obs_ev & ~mod_ev))
 
     def _safe(num, den, fallback=np.nan):
         return num / den if den > 0 else fallback
@@ -225,10 +254,10 @@ def contingencia(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict:
     POD       = _safe(H, H + M)
     FAR       = _safe(F, H + F)
     CSI       = _safe(H, H + M + F)
-    POFD      = _safe(F, F + C)          # prob. de falsa detección
-    TSS       = POD - POFD               # Pierce Skill Score (Hanssen-Kuipers)
-    PC        = _safe(H + C, N)          # Percent Correct
-    BIAS_FREQ = _safe(H + F, H + M)     # Frequency Bias (1 = sin sesgo)
+    POFD      = _safe(F, F + C)
+    TSS       = POD - POFD
+    PC        = _safe(H + C, N)
+    BIAS_FREQ = _safe(H + F, H + M)
 
     return {
         "N": N, "H": H, "M": M, "F": F, "C": C,
@@ -241,22 +270,13 @@ def contingencia(obs: np.ndarray, mod: np.ndarray, umbral: float) -> dict:
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# LECTURA Y AGRUPACIÓN DE CSV
-# ──────────────────────────────────────────────────────────────────────────────
-
 def leer_csvs(directorio: str, ciudades_filtro: list | None, mes_filtro: str | None) -> dict:
-    """
-    Lee los CSV de eval_*.csv y devuelve:
-        datos[mes][ciudad][cont] → DataFrame acumulado (días del mes)
-    """
-    import glob
     archivos = sorted(glob.glob(os.path.join(directorio, "eval_*.csv")))
     if not archivos:
         sys.exit(f"[ERROR] No se encontraron eval_*.csv en '{directorio}'.")
 
-    datos    = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-    n_ok     = 0
+    datos = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    n_ok = 0
 
     for ruta in archivos:
         meta = parsear_nombre_archivo(ruta)
@@ -289,15 +309,7 @@ def leer_csvs(directorio: str, ciudades_filtro: list | None, mes_filtro: str | N
 
 
 def calcular_resultados(datos: dict) -> dict:
-    """
-    Calcula los estadísticos dicotómicos para cada mes/ciudad/cont/horizonte.
-
-    Retorna:
-        resultados[mes][cont][ciudad][horizonte] → dict estadísticos | None
-    """
-    resultados = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(dict))
-    )
+    resultados = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
 
     for mes, ciudades in sorted(datos.items()):
         for ciudad, conts in sorted(ciudades.items()):
@@ -308,19 +320,11 @@ def calcular_resultados(datos: dict) -> dict:
 
                 for col, hor_label in HORIZONTES.items():
                     mod = df_mes[col].values
-                    st  = contingencia(
-                        np.asarray(obs, float),
-                        np.asarray(mod, float),
-                        umbral,
-                    )
+                    st  = contingencia(np.asarray(obs, float), np.asarray(mod, float), umbral)
                     resultados[mes][cont][ciudad][hor_label] = st
 
     return resultados
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# EXPORTAR CSV DE ESTADÍSTICOS (opcional, para auditoría)
-# ──────────────────────────────────────────────────────────────────────────────
 
 def exportar_csv(resultados: dict, ruta_csv: str) -> None:
     filas = []
@@ -330,8 +334,7 @@ def exportar_csv(resultados: dict, ruta_csv: str) -> None:
                 for hor, st in sorted(horizontes.items()):
                     if st is None:
                         continue
-                    fila = {"mes": mes, "contaminante": cont, "ciudad": ciudad,
-                            "horizonte": hor}
+                    fila = {"mes": mes, "contaminante": cont, "ciudad": ciudad, "horizonte": hor}
                     fila.update(st)
                     filas.append(fila)
     if filas:
@@ -340,661 +343,448 @@ def exportar_csv(resultados: dict, ruta_csv: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GENERACIÓN DEL DOCUMENTO WORD  (via script Node.js temporal)
+# GENERACIÓN DE DOCUMENTO WORD (PYTHON-DOCX)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_NOMBRE_MES = {
-    "01": "Enero",   "02": "Febrero",  "03": "Marzo",
-    "04": "Abril",   "05": "Mayo",     "06": "Junio",
-    "07": "Julio",   "08": "Agosto",   "09": "Septiembre",
-    "10": "Octubre", "11": "Noviembre","12": "Diciembre",
-}
-
-
-def _fmt(val, decimals=3) -> str:
-    """Formatea un valor numérico o devuelve 'N/D'."""
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return "N/D"
-    return f"{val:.{decimals}f}"
-
-
-def _color_pod(val) -> str:
-    if val is None:
-        return "808080"
-    if val >= 0.7:
-        return "1a7a3c"   # verde
-    if val >= 0.4:
-        return "b8860b"   # ámbar
-    return "b22222"       # rojo
-
-
-def _color_far(val) -> str:
-    if val is None:
-        return "808080"
-    if val <= 0.3:
-        return "1a7a3c"
-    if val <= 0.5:
-        return "b8860b"
-    return "b22222"
-
-
-def _color_csi(val) -> str:
-    if val is None:
-        return "808080"
-    if val >= 0.4:
-        return "1a7a3c"
-    if val >= 0.2:
-        return "b8860b"
-    return "b22222"
-
-
-def generar_json_datos(resultados: dict) -> dict:
-    """
-    Convierte resultados al formato JSON que consumirá el script Node.js.
-    Estructura: { meses: [ { mes, cont_sections: [ { cont, ciudades: [...] } ] } ] }
-    """
-    meses_out = []
-
-    for mes in sorted(resultados.keys()):
-        anio, mm = mes.split("-")
-        nombre_mes = _NOMBRE_MES.get(mm, mm)
-
-        cont_sections = []
-        for cont in sorted(resultados[mes].keys()):
-            meta    = META_CONT[cont]
-            umbral  = UMBRALES[cont]
-            ciudades_data = []
-
-            for ciudad in sorted(resultados[mes][cont].keys()):
-                horizontes_data = []
-                for hor_label in ["+24 h", "+48 h", "+72 h"]:
-                    st = resultados[mes][cont][ciudad].get(hor_label)
-                    if st is None:
-                        hd = {"horizonte": hor_label, "valido": False,
-                              "N": 0, "H": 0, "M": 0, "F": 0, "C": 0,
-                              "POD": None, "FAR": None, "CSI": None,
-                              "TSS": None, "PC": None, "BIAS": None}
-                    else:
-                        hd = {"horizonte": hor_label, "valido": True,
-                              **st,
-                              "POD_color": _color_pod(st["POD"]),
-                              "FAR_color": _color_far(st["FAR"]),
-                              "CSI_color": _color_csi(st["CSI"])}
-                    horizontes_data.append(hd)
-
-                ciudades_data.append({
-                    "ciudad":     ciudad,
-                    "horizontes": horizontes_data,
-                })
-
-            cont_sections.append({
-                "cont":    cont,
-                "nombre":  meta["nombre"],
-                "unidad":  meta["unidad"],
-                "norma":   meta["norma"],
-                "umbral":  umbral,
-                "desc":    meta["desc"],
-                "ciudades": ciudades_data,
-            })
-
-        meses_out.append({
-            "mes":          mes,
-            "nombre_mes":   nombre_mes,
-            "anio":         anio,
-            "cont_sections": cont_sections,
-        })
-
-    return {"meses": meses_out}
-
-
-NODE_SCRIPT = r"""
-// generar_docx.js — generado por informe_dicotomico.py
-// Requiere: npm package 'docx' (preinstalado en el entorno)
-
-const {
-  Document, Packer, Paragraph, Table, TableRow, TableCell,
-  TextRun, HeadingLevel, AlignmentType, WidthType,
-  ShadingType, BorderStyle, PageOrientation, Header,
-  ImageRun, convertInchesToTwip,
-  LevelFormat, VerticalAlign, PageBreak,
-} = require('docx');
-const fs = require('fs');
-
-// ──────── datos ────────
-const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-const outPath = process.argv[3];
-
-// ──────── helpers ────────
-const PAGE_W   = 12240;   // A4 landscape width  (DXA)
-const PAGE_H   = 8418;    // A4 landscape height (DXA)
-const MARGINS  = { top: 720, bottom: 720, left: 720, right: 720 };
-const USABLE_W = PAGE_W - MARGINS.left - MARGINS.right;   // 10800 DXA
-
-function rgb(hex) {
-  return hex.replace('#', '');
-}
-
-function boldRun(text, size=18, color="000000") {
-  return new TextRun({ text, bold: true, size, color });
-}
-function run(text, size=18, color="000000", italic=false) {
-  return new TextRun({ text, size, color, italics: italic });
-}
-
-function heading1(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_1,
-    spacing: { before: 240, after: 120 },
-    children: [new TextRun({ text, bold: true, size: 28, color: "1F497D" })],
-  });
-}
-function heading2(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_2,
-    spacing: { before: 200, after: 80 },
-    children: [new TextRun({ text, bold: true, size: 24, color: "2E74B5" })],
-  });
-}
-function heading3(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_3,
-    spacing: { before: 160, after: 60 },
-    children: [new TextRun({ text, bold: true, size: 22, color: "215868" })],
-  });
-}
-function para(text, size=18, spacing={before:60, after:60}) {
-  return new Paragraph({
-    spacing,
-    children: [new TextRun({ text, size })],
-  });
-}
-function paraRuns(runs, spacing={before:60, after:60}) {
-  return new Paragraph({ spacing, children: runs });
-}
-
-function cellShaded(hex) {
-  return { type: ShadingType.CLEAR, color: "auto", fill: hex };
-}
-
-// Celda de encabezado de tabla (fondo azul oscuro, texto blanco)
-function hdrCell(text, w, span=1) {
-  return new TableCell({
-    width:  { size: w, type: WidthType.DXA },
-    columnSpan: span,
-    shading: cellShaded("1F497D"),
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 40, after: 40 },
-      children: [boldRun(text, 16, "FFFFFF")],
-    })],
-  });
-}
-
-// Celda de subencabezado (fondo azul claro)
-function subHdrCell(text, w) {
-  return new TableCell({
-    width: { size: w, type: WidthType.DXA },
-    shading: cellShaded("BDD7EE"),
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 30, after: 30 },
-      children: [boldRun(text, 15, "1F497D")],
-    })],
-  });
-}
-
-// Celda de dato numérico con color opcional
-function dataCell(text, w, color="000000", bgColor="FFFFFF", bold=false) {
-  return new TableCell({
-    width: { size: w, type: WidthType.DXA },
-    shading: cellShaded(bgColor),
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 30, after: 30 },
-      children: [new TextRun({ text, size: 16, color, bold })],
-    })],
-  });
-}
-
-// Celda de ciudad (primera columna)
-function ciudadCell(text, w) {
-  return new TableCell({
-    width: { size: w, type: WidthType.DXA },
-    shading: cellShaded("EBF3FB"),
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      spacing: { before: 30, after: 30 },
-      children: [boldRun(text, 16, "215868")],
-    })],
-  });
-}
-
-function fmtVal(val) {
-  return (val === null || val === undefined) ? "N/D" : Number(val).toFixed(3);
-}
-
-// Colores de semáforo para celdas
-function bgPOD(v)  { if(v===null||v===undefined) return "E8E8E8"; return v>=0.7?"C6EFCE":v>=0.4?"FFEB9C":"FFC7CE"; }
-function bgFAR(v)  { if(v===null||v===undefined) return "E8E8E8"; return v<=0.3?"C6EFCE":v<=0.5?"FFEB9C":"FFC7CE"; }
-function bgCSI(v)  { if(v===null||v===undefined) return "E8E8E8"; return v>=0.4?"C6EFCE":v>=0.2?"FFEB9C":"FFC7CE"; }
-function bgTSS(v)  { if(v===null||v===undefined) return "E8E8E8"; return v>=0.4?"C6EFCE":v>=0.1?"FFEB9C":"FFC7CE"; }
-function bgBIAS(v) { if(v===null||v===undefined) return "E8E8E8";
-  const b = Math.abs(v - 1.0);
-  return b<=0.3?"C6EFCE":b<=0.6?"FFEB9C":"FFC7CE";
-}
-
-// ──────── construcción de tabla por contaminante ────────
-//
-// Layout (landscape A4, USABLE_W = 10 800 DXA):
-//   Ciudad (1400) | H+M+F+C (600) | [+24h: POD FAR CSI TSS PC BIAS] | [+48h] | [+72h]
-//   Columnas de estadísticos: 6 × 3 horizontes = 18 cols × ~500 DXA = 9 000
-//   Total: 1400 + 600 + 9000 = 11000 → ajustamos a 10800
-
-const W_CIUDAD = 1400;
-const W_N      = 600;
-const W_STAT   = 492;   // 6 stats × 3 horizontes × 492 ≈ 8856 → total 10856 ≈ 10800 (ajuste fino)
-const STATS    = ["POD", "FAR", "CSI", "TSS", "PC", "BIAS"];
-const BG_FN    = { POD: bgPOD, FAR: bgFAR, CSI: bgCSI, TSS: bgTSS, PC: ()=>"FFFFFF", BIAS: bgBIAS };
-
-function buildTable(contSection) {
-  const HORS = ["+24 h", "+48 h", "+72 h"];
-  const rows = [];
-
-  // ── Fila 1: encabezado principal ──────────────────────────────────────────
-  const hdrCells1 = [
-    hdrCell("Ciudad",    W_CIUDAD),
-    hdrCell("N días",    W_N),
-  ];
-  for (const hor of HORS) {
-    hdrCells1.push(hdrCell(hor, W_STAT * STATS.length, STATS.length));
-  }
-  rows.push(new TableRow({ tableHeader: true, children: hdrCells1 }));
-
-  // ── Fila 2: subencabezado (nombres de estadísticos) ───────────────────────
-  const hdrCells2 = [
-    subHdrCell("",       W_CIUDAD),
-    subHdrCell("",       W_N),
-  ];
-  for (let i = 0; i < 3; i++) {
-    for (const s of STATS) {
-      hdrCells2.push(subHdrCell(s, W_STAT));
-    }
-  }
-  rows.push(new TableRow({ tableHeader: true, children: hdrCells2 }));
-
-  // ── Filas de datos por ciudad ─────────────────────────────────────────────
-  for (const cd of contSection.ciudades) {
-    // N total: tomar el horizonte +24h como referencia (tiene más días)
-    const h24 = cd.horizontes.find(h => h.horizonte === "+24 h");
-    const nTotal = (h24 && h24.valido) ? String(h24.N) : "—";
-
-    const cells = [
-      ciudadCell(cd.ciudad, W_CIUDAD),
-      dataCell(nTotal, W_N, "215868", "EBF3FB", true),
-    ];
-
-    for (const hor of HORS) {
-      const hd = cd.horizontes.find(h => h.horizonte === hor) || {};
-      for (const stat of STATS) {
-        const val = hd.valido ? hd[stat] : null;
-        const bg  = BG_FN[stat](val);
-        cells.push(dataCell(fmtVal(val), W_STAT, "222222", bg));
-      }
-    }
-    rows.push(new TableRow({ children: cells }));
-  }
-
-  return new Table({
-    width: { size: USABLE_W, type: WidthType.DXA },
-    columnWidths: [
-      W_CIUDAD, W_N,
-      ...Array(STATS.length * 3).fill(W_STAT),
-    ],
-    rows,
-  });
-}
-
-// ──────── tabla de contingencia por ciudad (detalle) ────────
-function buildContingencyTable(contSection) {
-  const HORS = ["+24 h", "+48 h", "+72 h"];
-  const rows = [];
-
-  // Encabezado
-  const hc = [
-    hdrCell("Ciudad",  W_CIUDAD),
-    ...HORS.map(h => hdrCell(h, W_N * 4, 4)),
-  ];
-  rows.push(new TableRow({ tableHeader: true, children: hc }));
-
-  // Sub-encabezado H M F C
-  const hc2 = [subHdrCell("", W_CIUDAD)];
-  for (let i = 0; i < 3; i++) {
-    for (const lbl of ["H", "M", "F", "C"]) {
-      hc2.push(subHdrCell(lbl, W_N));
-    }
-  }
-  rows.push(new TableRow({ tableHeader: true, children: hc2 }));
-
-  for (const cd of contSection.ciudades) {
-    const cells = [ciudadCell(cd.ciudad, W_CIUDAD)];
-    for (const hor of HORS) {
-      const hd = cd.horizontes.find(h => h.horizonte === hor) || {};
-      for (const lbl of ["H", "M", "F", "C"]) {
-        const val = hd.valido ? String(hd[lbl]) : "—";
-        const bg  = lbl === "H" ? "C6EFCE" : lbl === "M" || lbl === "F" ? "FFC7CE" : "FFFFFF";
-        cells.push(dataCell(val, W_N, "222222", bg));
-      }
-    }
-    rows.push(new TableRow({ children: cells }));
-  }
-
-  return new Table({
-    width: { size: USABLE_W, type: WidthType.DXA },
-    columnWidths: [W_CIUDAD, ...Array(12).fill(W_N)],
-    rows,
-  });
-}
-
-// ──────── leyenda de semáforo ────────
-function buildLeyendaTable() {
-  const rows = [];
-  const items = [
-    { stat: "POD", verde: "≥ 0.700", ambar: "0.400 – 0.699", rojo: "< 0.400" },
-    { stat: "FAR", verde: "≤ 0.300", ambar: "0.301 – 0.500", rojo: "> 0.500" },
-    { stat: "CSI", verde: "≥ 0.400", ambar: "0.200 – 0.399", rojo: "< 0.200" },
-    { stat: "TSS", verde: "≥ 0.400", ambar: "0.100 – 0.399", rojo: "< 0.100" },
-    { stat: "BIAS", verde: "|BIAS-1| ≤ 0.3", ambar: "0.3 – 0.6", rojo: "> 0.6" },
-  ];
-  rows.push(new TableRow({ tableHeader: true, children: [
-    hdrCell("Métrica", 1000),
-    hdrCell("🟢  Bueno", 2600),
-    hdrCell("🟡  Aceptable", 2600),
-    hdrCell("🔴  Deficiente", 2600),
-  ]}));
-  for (const it of items) {
-    rows.push(new TableRow({ children: [
-      ciudadCell(it.stat, 1000),
-      dataCell(it.verde, 2600, "1a7a3c", "C6EFCE"),
-      dataCell(it.ambar, 2600, "7d5a00", "FFEB9C"),
-      dataCell(it.rojo,  2600, "9c1b1b", "FFC7CE"),
-    ]}));
-  }
-  return new Table({
-    width: { size: 8800, type: WidthType.DXA },
-    columnWidths: [1000, 2600, 2600, 2600],
-    rows,
-  });
-}
-
-// ──────── sección de definición de métricas ────────
-function defMetricas() {
-  const elems = [
-    heading2("Definición de estadísticos dicotómicos"),
-    para(
-      "Los estadísticos dicotómicos se calculan a partir de una tabla de contingencia 2×2 " +
-      "en la que cada día se clasifica según si el valor observado y el modelado superaron " +
-      "o no el umbral normativo del contaminante.",
-      18, { before: 60, after: 80 }
-    ),
-  ];
-
-  // Tabla de contingencia conceptual
-  const W2 = [1600, 2800, 2800];
-  const hRow = new TableRow({ tableHeader: true, children: [
-    hdrCell("",                 W2[0]),
-    hdrCell("Obs. EVENTO",      W2[1]),
-    hdrCell("Obs. NO EVENTO",   W2[2]),
-  ]});
-  const r1 = new TableRow({ children: [
-    ciudadCell("Mod. EVENTO",    W2[0]),
-    dataCell("H — Acierto",      W2[1], "1a7a3c", "C6EFCE", true),
-    dataCell("F — Falsa Alarma", W2[2], "9c1b1b", "FFC7CE", true),
-  ]});
-  const r2 = new TableRow({ children: [
-    ciudadCell("Mod. NO EVENTO", W2[0]),
-    dataCell("M — Fallo",        W2[1], "9c1b1b", "FFC7CE", true),
-    dataCell("C — Rechazo Corr.",W2[2], "1a7a3c", "C6EFCE", true),
-  ]});
-  elems.push(new Table({
-    width: { size: 7200, type: WidthType.DXA },
-    columnWidths: W2,
-    rows: [hRow, r1, r2],
-  }));
-  elems.push(para(""));
-
-  const defs = [
-    ["POD",  "= H / (H + M)",          "Probabilidad de detección (Probability of Detection). Fracción de eventos observados que el modelo detecta correctamente. Ideal = 1."],
-    ["FAR",  "= F / (H + F)",           "Tasa de falsas alarmas (False Alarm Ratio). Fracción de eventos modelados que no ocurrieron. Ideal = 0."],
-    ["CSI",  "= H / (H + M + F)",       "Índice de éxito crítico (Critical Success Index). Combina fallos y falsas alarmas; no considera rechazos correctos. Ideal = 1."],
-    ["TSS",  "= POD − F/(F+C)",         "Pierce Skill Score (Hanssen-Kuipers discriminant). Diferencia entre tasa de detección y tasa de falsa detección. Rango [−1, 1]; ideal = 1."],
-    ["PC",   "= (H + C) / N",           "Porcentaje correcto (Percent Correct). Fracción de días clasificados correctamente. Ideal = 1; puede ser engañoso cuando los eventos son raros."],
-    ["BIAS", "= (H + F) / (H + M)",     "Sesgo de frecuencia (Frequency Bias). Cociente entre número de eventos pronosticados y observados. Ideal = 1; >1 sobreestima eventos; <1 los subestima."],
-  ];
-  for (const [nombre, formula, desc] of defs) {
-    elems.push(paraRuns([
-      boldRun(nombre + " ", 18),
-      new TextRun({ text: formula, size: 18, italics: true, color: "1F497D" }),
-    ], { before: 60, after: 20 }));
-    elems.push(para("    " + desc, 17, { before: 20, after: 50 }));
-  }
-  return elems;
-}
-
-// ──────── Construcción del documento ────────
-async function main() {
-  const children = [];
-
-  // ── Portada ──────────────────────────────────────────────────────────────
-  children.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 1440, after: 240 },
-    children: [boldRun("EVALUACIÓN DICOTÓMICA MENSUAL DEL PRONÓSTICO", 36, "1F497D")],
-  }));
-  children.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 0, after: 120 },
-    children: [boldRun("WRF-Chem vs SINAICA/INECC", 28, "2E74B5")],
-  }));
-  children.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 120, after: 120 },
-    children: [run("Centro de México — Ocho zonas metropolitanas", 22, "215868")],
-  }));
-  children.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 60, after: 60 },
-    children: [run(
-      data.meses.map(m => m.nombre_mes + " " + m.anio).join("  ·  "),
-      20, "444444"
-    )],
-  }));
-  children.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 60, after: 60 },
-    children: [run("Generado automáticamente por informe_dicotomico.py — ddsinaica / ICAyCC, UNAM", 16, "888888")],
-  }));
-  // Separador
-  children.push(new Paragraph({
-    border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: "2E74B5" } },
-    spacing: { before: 240, after: 240 },
-    children: [],
-  }));
-
-  // ── Resumen metodológico ─────────────────────────────────────────────────
-  children.push(heading1("1. Introducción y metodología"));
-  children.push(para(
-    "El presente informe resume el desempeño del sistema de pronóstico de calidad " +
-    "del aire WRF-Chem en la detección de episodios de contaminación (excedencias de " +
-    "la norma) para cuatro contaminantes regulados en ocho zonas metropolitanas del " +
-    "centro de México. La evaluación se realiza mediante estadísticos dicotómicos " +
-    "calculados sobre la tabla de contingencia 2×2, comparando si el máximo diario " +
-    "observado y el modelado superan o no el umbral normativo del contaminante.",
-    18, { before: 80, after: 80 }
-  ));
-
-  // Tabla de umbrales
-  children.push(heading2("Umbrales normativos empleados"));
-  const WU = [2200, 1400, 1400, 3800];
-  const uRows = [
-    new TableRow({ tableHeader: true, children: [
-      hdrCell("Contaminante",  WU[0]),
-      hdrCell("Umbral",        WU[1]),
-      hdrCell("Unidad",        WU[2]),
-      hdrCell("Norma",         WU[3]),
-    ]}),
-    ...data.meses[0].cont_sections.map(cs => new TableRow({ children: [
-      ciudadCell(cs.nombre, WU[0]),
-      dataCell(String(cs.umbral), WU[1], "1F497D", "EBF3FB", true),
-      dataCell(cs.unidad,         WU[2]),
-      dataCell(cs.norma,          WU[3]),
-    ]})),
-  ];
-  children.push(new Table({
-    width: { size: 8800, type: WidthType.DXA },
-    columnWidths: WU,
-    rows: uRows,
-  }));
-  children.push(para(""));
-
-  // Definición de métricas
-  for (const e of defMetricas()) children.push(e);
-
-  // Leyenda
-  children.push(heading2("Leyenda de semáforo de desempeño"));
-  children.push(buildLeyendaTable());
-  children.push(para(""));
-
-  // ── Resultados por mes → contaminante ────────────────────────────────────
-  let secNum = 2;
-  for (const mesData of data.meses) {
-    // Salto de página antes de cada mes (excepto el primero)
-    children.push(new Paragraph({
-      children: [new PageBreak()],
-    }));
-    children.push(heading1(
-      `${secNum}. Resultados — ${mesData.nombre_mes} ${mesData.anio}`
-    ));
-    secNum++;
-
-    let subNum = 1;
-    for (const cs of mesData.cont_sections) {
-      children.push(heading2(
-        `${secNum - 1}.${subNum}  ${cs.nombre}  (umbral: ${cs.umbral} ${cs.unidad}, ${cs.norma})`
-      ));
-      children.push(para(cs.desc, 17, { before: 40, after: 80 }));
-
-      // Tabla principal de estadísticos
-      children.push(heading3("Estadísticos de verificación dicotómica"));
-      children.push(buildTable(cs));
-      children.push(para(""));
-
-      // Tabla de contingencia (H M F C)
-      children.push(heading3("Tabla de contingencia (H, M, F, C)"));
-      children.push(buildContingencyTable(cs));
-      children.push(para("",18,{before:0,after:80}));
-
-      subNum++;
-    }
-  }
-
-  // ── Notas finales ─────────────────────────────────────────────────────────
-  children.push(new Paragraph({ children: [new PageBreak()] }));
-  children.push(heading1("Notas técnicas"));
-  children.push(para(
-    "• Los valores N/D indican que no se alcanzó el mínimo de días con datos " +
-    "necesarios para el cálculo (≥5 pares obs/mod válidos).",
-    17, { before: 60, after: 40 }
-  ));
-  children.push(para(
-    "• El horizonte +72 h cubre solo 18 h de la ventana local (índices 54–71 " +
-    "del wrfout) por la alineación UTC−6 con el inicio del run.",
-    17, { before: 40, after: 40 }
-  ));
-  children.push(para(
-    "• BIAS = 1 indica que el modelo pronosticó el mismo número de eventos que " +
-    "los observados (sin importar la coincidencia día a día). BIAS > 1 indica " +
-    "sobreestimación de la frecuencia; BIAS < 1, subestimación.",
-    17, { before: 40, after: 40 }
-  ));
-  children.push(para(
-    "• Las observaciones provienen de la red SINAICA/INECC; los valores del modelo " +
-    "corresponden al máximo diario extraído del dominio WRF-Chem sobre la " +
-    "región de cada ciudad (máximo espacial).",
-    17, { before: 40, after: 40 }
-  ));
-  children.push(para(
-    "• Generado con: informe_dicotomico.py (ddsinaica v2.5.0) — " +
-    "ICAyCC, UNAM. Código disponible en https://github.com/JoseAgustin/ddsinaica",
-    16, { before: 60, after: 40 }
-  ));
-
-  // ── Armar documento ───────────────────────────────────────────────────────
-  const doc = new Document({
-    styles: {
-      paragraphStyles: [
-        {
-          id: "Normal",
-          name: "Normal",
-          run: { font: "Calibri", size: 18 },
-        },
-      ],
-    },
-    sections: [{
-      properties: {
-        page: {
-          size:        { width: PAGE_W, height: PAGE_H, orientation: PageOrientation.LANDSCAPE },
-          margin:      MARGINS,
-        },
-      },
-      headers: {
-        default: new Header({
-          children: [new Paragraph({
-            alignment: AlignmentType.RIGHT,
-            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: "2E74B5" } },
-            children: [
-              new TextRun({ text: "Evaluación Dicotómica WRF-Chem vs SINAICA  |  ICAyCC, UNAM", size: 14, color: "888888" }),
-            ],
-          })],
-        }),
-      },
-      children,
-    }],
-  });
-
-  const buf = await Packer.toBuffer(doc);
-  fs.writeFileSync(outPath, buf);
-  console.log("[OK] Documento generado: " + outPath);
-}
-
-main().catch(e => { console.error(e); process.exit(1); });
-"""
+def set_cell_background(cell, hex_color: str):
+    if not hex_color:
+        return
+    shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}"/>')
+    cell._tc.get_or_add_tcPr().append(shading)
+
+def set_repeat_header(row):
+    trPr = row._tr.get_or_add_trPr()
+    trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
+
+def set_cant_split(row):
+    trPr = row._tr.get_or_add_trPr()
+    trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+
+def format_cell(cell, text: str, font_size=8, bold=False, color="000000", bg_color="FFFFFF", align=WD_ALIGN_PARAGRAPH.CENTER, width=None):
+    if width is not None:
+        cell.width = width
+    set_cell_background(cell, bg_color)
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    p = cell.paragraphs[0]
+    p.alignment = align
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after = Pt(2)
+
+    run = p.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(font_size)
+    run.font.bold = bold
+    run.font.color.rgb = RGBColor.from_string(color)
+    return cell
+
+def create_styled_table(doc, rows: int, cols: int):
+    """Crea una tabla estilizada configurada para autoajustarse a la ventana."""
+    table = doc.add_table(rows=rows, cols=cols)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+
+    # Forzar ancho al 100% de la ventana (entre márgenes) y autoajuste dinámico OpenXML
+    tblPr = table._tbl.tblPr
+    for child in list(tblPr):
+        if child.tag.endswith('tblW') or child.tag.endswith('tblLayout'):
+            tblPr.remove(child)
+            
+    tblW = parse_xml(f'<w:tblW {nsdecls("w")} w:w="5000" w:type="pct"/>')
+    tblLayout = parse_xml(f'<w:tblLayout {nsdecls("w")} w:type="autofit"/>')
+    tblPr.append(tblW)
+    tblPr.append(tblLayout)
+
+    return table
+
+def add_heading_1(doc, text: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(12)
+    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.keep_with_next = True
+    run = p.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(14)
+    run.font.bold = True
+    run.font.color.rgb = RGBColor.from_string("1F497D")
+    return p
+
+def add_heading_2(doc, text: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(4)
+    p.paragraph_format.keep_with_next = True
+    run = p.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(12)
+    run.font.bold = True
+    run.font.color.rgb = RGBColor.from_string("2E74B5")
+    return p
+
+def add_heading_3(doc, text: str):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(8)
+    p.paragraph_format.space_after = Pt(3)
+    p.paragraph_format.keep_with_next = True
+    run = p.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(11)
+    run.font.bold = True
+    run.font.color.rgb = RGBColor.from_string("215868")
+    return p
+
+def add_para(doc, text: str, size=9, space_before=3, space_after=3, italic=False, bold=False):
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(space_before)
+    p.paragraph_format.space_after = Pt(space_after)
+    run = p.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(size)
+    run.font.italic = italic
+    run.font.bold = bold
+    return p
 
 
 def generar_docx(resultados: dict, ruta_salida: str) -> None:
-    """Serializa los resultados a JSON, llama al script Node.js y genera el .docx."""
+    doc = Document()
 
-    datos_json = generar_json_datos(resultados)
+    # Configuración de página (Horizontal / Letter)
+    section = doc.sections[0]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11.)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
+    section.left_margin = Inches(0.6)
+    section.right_margin = Inches(0.6)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ruta_json = os.path.join(tmpdir, "datos.json")
-        ruta_js   = os.path.join(tmpdir, "generar_docx.js")
+    # Encabezado
+    header = section.header
+    hp = header.paragraphs[0]
+    hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    hrun = hp.add_run("Evaluación Dicotómica WRF-Chem vs SINAICA  |  ICAyCC, UNAM")
+    hrun.font.name = "Calibri"
+    hrun.font.size = Pt(8)
+    hrun.font.color.rgb = RGBColor.from_string("888888")
 
-        with open(ruta_json, "w", encoding="utf-8") as f:
-            json.dump(datos_json, f, ensure_ascii=False, indent=2)
-        with open(ruta_js, "w", encoding="utf-8") as f:
-            f.write(NODE_SCRIPT)
+    # ── Portada ──────────────────────────────────────────────────────────────
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.paragraph_format.space_before = Pt(36)
+    p_title.paragraph_format.space_after = Pt(12)
+    r_title = p_title.add_run("EVALUACIÓN DICOTÓMICA MENSUAL DEL PRONÓSTICO")
+    r_title.font.name = "Calibri"
+    r_title.font.size = Pt(18)
+    r_title.font.bold = True
+    r_title.font.color.rgb = RGBColor.from_string("1F497D")
 
-        result = subprocess.run(
-            ["node", ruta_js, ruta_json, os.path.abspath(ruta_salida)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print("[ERROR] Node.js:", result.stderr)
-            sys.exit(1)
-        print(result.stdout.strip())
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_sub.paragraph_format.space_before = Pt(0)
+    p_sub.paragraph_format.space_after = Pt(6)
+    r_sub = p_sub.add_run("WRF-Chem vs SINAICA/INECC")
+    r_sub.font.name = "Calibri"
+    r_sub.font.size = Pt(14)
+    r_sub.font.bold = True
+    r_sub.font.color.rgb = RGBColor.from_string("2E74B5")
+
+    p_reg = doc.add_paragraph()
+    p_reg.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_reg.paragraph_format.space_before = Pt(6)
+    p_reg.paragraph_format.space_after = Pt(6)
+    r_reg = p_reg.add_run("Centro de México — Ocho zonas metropolitanas")
+    r_reg.font.name = "Calibri"
+    r_reg.font.size = Pt(11)
+    r_reg.font.color.rgb = RGBColor.from_string("215868")
+
+    meses_txt = []
+    for m in sorted(resultados.keys()):
+        a, mm = m.split("-")
+        meses_txt.append(f"{_NOMBRE_MES.get(mm, mm)} {a}")
+
+    p_meses = doc.add_paragraph()
+    p_meses.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_meses.paragraph_format.space_before = Pt(3)
+    p_meses.paragraph_format.space_after = Pt(3)
+    r_m = p_meses.add_run("  ·  ".join(meses_txt))
+    r_m.font.name = "Calibri"
+    r_m.font.size = Pt(10)
+    r_m.font.color.rgb = RGBColor.from_string("444444")
+
+    p_gen = doc.add_paragraph()
+    p_gen.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_gen.paragraph_format.space_before = Pt(3)
+    p_gen.paragraph_format.space_after = Pt(12)
+    r_g = p_gen.add_run("Generado automáticamente por informe_dicotomico.py — ddsinaica / ICAyCC, UNAM")
+    r_g.font.name = "Calibri"
+    r_g.font.size = Pt(8)
+    r_g.font.color.rgb = RGBColor.from_string("888888")
+
+    # ── 1. Introducción y metodología ────────────────────────────────────────
+    add_heading_1(doc, "1. Introducción y metodología")
+    add_para(
+        doc,
+        "El presente informe resume el desempeño del sistema de pronóstico de calidad "
+        "del aire WRF-Chem en la detección de episodios de contaminación (excedencias de "
+        "la norma) para cuatro contaminantes regulados en ocho zonas metropolitanas del "
+        "centro de México. La evaluación se realiza mediante estadísticos dicotómicos "
+        "calculados sobre la tabla de contingencia 2×2, comparando si el máximo diario "
+        "observado y el modelado superan o no el umbral normativo del contaminante.",
+        size=9, space_before=4, space_after=4
+    )
+
+    add_heading_2(doc, "Umbrales normativos empleados")
+    t_umb = create_styled_table(doc, rows=1 + len(UMBRALES), cols=4)
+    t_umb.style = 'Table Grid'
+    
+    headers_u = ["Contaminante", "Umbral", "Unidad", "Norma"]
+    widths_u = [Inches(2.2), Inches(1.4), Inches(1.4), Inches(3.8)]
+    for j, h in enumerate(headers_u):
+        format_cell(t_umb.cell(0, j), h, font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=widths_u[j])
+    set_repeat_header(t_umb.rows[0])
+    set_cant_split(t_umb.rows[0])
+
+    for i, (cont, meta) in enumerate(META_CONT.items(), start=1):
+        row = t_umb.rows[i]
+        format_cell(row.cells[0], meta["nombre"], font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=widths_u[0])
+        format_cell(row.cells[1], str(UMBRALES[cont]), font_size=8, bold=True, color="1F497D", bg_color="EBF3FB", width=widths_u[1])
+        format_cell(row.cells[2], meta["unidad"], font_size=8, color="000000", width=widths_u[2])
+        format_cell(row.cells[3], meta["norma"], font_size=8, color="000000", align=WD_ALIGN_PARAGRAPH.LEFT, width=widths_u[3])
+        set_cant_split(row)
+
+    add_para(doc, "", size=6)
+
+    add_heading_2(doc, "Definición de estadísticos dicotómicos")
+    add_para(
+        doc,
+        "Los estadísticos dicotómicos se calculan a partir de una tabla de contingencia 2×2 "
+        "en la que cada día se clasifica según si el valor observado y el modelado superaron "
+        "o no el umbral normativo del contaminante.",
+        size=9, space_before=3, space_after=4
+    )
+
+    # Contingencia conceptual
+    t_concept = create_styled_table(doc, rows=3, cols=3)
+    t_concept.style = 'Table Grid'
+    widths_c = [Inches(2.0), Inches(2.8), Inches(2.8)]
+    
+    format_cell(t_concept.cell(0, 0), "", font_size=8, bg_color="1F497D", width=widths_c[0])
+    format_cell(t_concept.cell(0, 1), "Obs. EVENTO", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=widths_c[1])
+    format_cell(t_concept.cell(0, 2), "Obs. NO EVENTO", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=widths_c[2])
+    
+    format_cell(t_concept.cell(1, 0), "Mod. EVENTO", font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=widths_c[0])
+    format_cell(t_concept.cell(1, 1), "H — Acierto", font_size=8, bold=True, color="1A7A3C", bg_color="C6EFCE", width=widths_c[1])
+    format_cell(t_concept.cell(1, 2), "F — Falsa Alarma", font_size=8, bold=True, color="9C1B1B", bg_color="FFC7CE", width=widths_c[2])
+    
+    format_cell(t_concept.cell(2, 0), "Mod. NO EVENTO", font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=widths_c[0])
+    format_cell(t_concept.cell(2, 1), "M — Fallo", font_size=8, bold=True, color="9C1B1B", bg_color="FFC7CE", width=widths_c[1])
+    format_cell(t_concept.cell(2, 2), "C — Rechazo Corr.", font_size=8, bold=True, color="1A7A3C", bg_color="C6EFCE", width=widths_c[2])
+
+    add_para(doc, "", size=6)
+
+    defs = [
+        ("POD",  "= H / (H + M)",          "Probabilidad de detección (Probability of Detection). Fracción de eventos observados que el modelo detecta correctamente. Ideal = 1."),
+        ("FAR",  "= F / (H + F)",           "Tasa de falsas alarmas (False Alarm Ratio). Fracción de eventos modelados que no ocurrieron. Ideal = 0."),
+        ("CSI",  "= H / (H + M + F)",       "Índice de éxito crítico (Critical Success Index). Combina fallos y falsas alarmas; no considera rechazos correctos. Ideal = 1."),
+        ("TSS",  "= POD − F/(F+C)",         "Pierce Skill Score (Hanssen-Kuipers discriminant). Diferencia entre tasa de detección y tasa de falsa detección. Rango [−1, 1]; ideal = 1."),
+        ("PC",   "= (H + C) / N",           "Porcentaje correcto (Percent Correct). Fracción de días clasificados correctamente. Ideal = 1; puede ser engañoso cuando los eventos son raros."),
+        ("BIAS", "= (H + F) / (H + M)",     "Sesgo de frecuencia (Frequency Bias). Cociente entre número de eventos pronosticados y observados. Ideal = 1; >1 sobreestima eventos; <1 los subestima."),
+    ]
+
+    for nombre, formula, desc in defs:
+        p_def = doc.add_paragraph()
+        p_def.paragraph_format.space_before = Pt(3)
+        p_def.paragraph_format.space_after = Pt(1)
+        
+        r1 = p_def.add_run(f"{nombre} ")
+        r1.font.name = "Calibri"
+        r1.font.size = Pt(9)
+        r1.font.bold = True
+        
+        r2 = p_def.add_run(f"{formula}  ")
+        r2.font.name = "Calibri"
+        r2.font.size = Pt(9)
+        r2.font.italic = True
+        r2.font.color.rgb = RGBColor.from_string("1F497D")
+        
+        r3 = p_def.add_run(desc)
+        r3.font.name = "Calibri"
+        r3.font.size = Pt(8.5)
+
+    add_heading_2(doc, "Leyenda de semáforo de desempeño")
+    t_ley = create_styled_table(doc, rows=6, cols=4)
+    t_ley.style = 'Table Grid'
+    widths_l = [Inches(1.2), Inches(2.6), Inches(2.6), Inches(2.6)]
+
+    headers_l = ["Métrica", "🟢  Bueno", "🟡  Aceptable", "🔴  Deficiente"]
+    for j, h in enumerate(headers_l):
+        format_cell(t_ley.cell(0, j), h, font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=widths_l[j])
+    set_repeat_header(t_ley.rows[0])
+
+    items_ley = [
+        {"stat": "POD",  "verde": "≥ 0.700",         "ambar": "0.400 – 0.699", "rojo": "< 0.400"},
+        {"stat": "FAR",  "verde": "≤ 0.300",         "ambar": "0.301 – 0.500", "rojo": "> 0.500"},
+        {"stat": "CSI",  "verde": "≥ 0.400",         "ambar": "0.200 – 0.399", "rojo": "< 0.200"},
+        {"stat": "TSS",  "verde": "≥ 0.400",         "ambar": "0.100 – 0.399", "rojo": "< 0.100"},
+        {"stat": "BIAS", "verde": "|BIAS-1| ≤ 0.3",  "ambar": "0.3 – 0.6",     "rojo": "> 0.6"},
+    ]
+
+    for i, it in enumerate(items_ley, start=1):
+        row = t_ley.rows[i]
+        format_cell(row.cells[0], it["stat"],  font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=widths_l[0])
+        format_cell(row.cells[1], it["verde"], font_size=8, color="1A7A3C", bg_color="C6EFCE", width=widths_l[1])
+        format_cell(row.cells[2], it["ambar"], font_size=8, color="7D5A00", bg_color="FFEB9C", width=widths_l[2])
+        format_cell(row.cells[3], it["rojo"],  font_size=8, color="9C1B1B", bg_color="FFC7CE", width=widths_l[3])
+        set_cant_split(row)
+
+    add_para(doc, "", size=6)
+
+    # ── Resultados por Mes ───────────────────────────────────────────────────
+    sec_num = 2
+    stats_cols = ["POD", "FAR", "CSI", "TSS", "PC", "BIAS"]
+
+    for mes in sorted(resultados.keys()):
+        doc.add_page_break()
+        
+        a, mm = mes.split("-")
+        nombre_mes = _NOMBRE_MES.get(mm, mm)
+        
+        add_heading_1(doc, f"{sec_num}. Resultados — {nombre_mes} {a}")
+        sec_num += 1
+
+        sub_num = 1
+        for cont in sorted(resultados[mes].keys()):
+            meta = META_CONT[cont]
+            umbral = UMBRALES[cont]
+            ciudades_dict = resultados[mes][cont]
+
+            add_heading_2(doc, f"{sec_num - 1}.{sub_num}  {meta['nombre']}  (umbral: {umbral} {meta['unidad']}, {meta['norma']})")
+            add_para(doc, meta["desc"], size=8.5, space_before=2, space_after=4)
+
+            # Tabla Principal de Estadísticos
+            add_heading_3(doc, "Estadísticos de verificación dicotómica")
+            
+            num_ciudades = len(ciudades_dict)
+            t_stat = create_styled_table(doc, rows=2 + num_ciudades, cols=20)
+            t_stat.style = 'Table Grid'
+
+            w_ciudad = Inches(1.3)
+            w_n      = Inches(0.5)
+            w_s      = Inches(0.48)
+
+            # Encabezados de Fila 0
+            format_cell(t_stat.cell(0, 0), "Ciudad", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=w_ciudad)
+            format_cell(t_stat.cell(0, 1), "N días", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=w_n)
+
+            c24 = t_stat.cell(0, 2);  c24.merge(t_stat.cell(0, 7))
+            format_cell(c24, "+24 h", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D")
+
+            c48 = t_stat.cell(0, 8);  c48.merge(t_stat.cell(0, 13))
+            format_cell(c48, "+48 h", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D")
+
+            c72 = t_stat.cell(0, 14); c72.merge(t_stat.cell(0, 19))
+            format_cell(c72, "+72 h", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D")
+
+            set_repeat_header(t_stat.rows[0])
+            set_cant_split(t_stat.rows[0])
+
+            # Encabezados de Fila 1 (Métricas)
+            format_cell(t_stat.cell(1, 0), "", font_size=7.5, bg_color="BDD7EE", width=w_ciudad)
+            format_cell(t_stat.cell(1, 1), "", font_size=7.5, bg_color="BDD7EE", width=w_n)
+
+            col_idx = 2
+            for _ in range(3):
+                for st_name in stats_cols:
+                    format_cell(t_stat.cell(1, col_idx), st_name, font_size=7.5, bold=True, color="1F497D", bg_color="BDD7EE", width=w_s)
+                    col_idx += 1
+
+            set_repeat_header(t_stat.rows[1])
+            set_cant_split(t_stat.rows[1])
+
+            # Filas de Datos por Ciudad
+            for r_i, (ciudad, horizontes) in enumerate(sorted(ciudades_dict.items()), start=2):
+                row = t_stat.rows[r_i]
+
+                st24 = horizontes.get("+24 h")
+                n_txt = str(st24["N"]) if st24 and st24.get("N") is not None else "—"
+
+                format_cell(row.cells[0], ciudad, font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=w_ciudad)
+                format_cell(row.cells[1], n_txt,  font_size=8, bold=True, color="215868", bg_color="EBF3FB", width=w_n)
+
+                c_idx = 2
+                for hor_lbl in ["+24 h", "+48 h", "+72 h"]:
+                    st_h = horizontes.get(hor_lbl)
+                    for st_name in stats_cols:
+                        val = st_h.get(st_name) if st_h else None
+                        val_str = _fmt(val)
+                        bg = BG_FN[st_name](val)
+                        format_cell(row.cells[c_idx], val_str, font_size=7.5, color="222222", bg_color=bg, width=w_s)
+                        c_idx += 1
+                set_cant_split(row)
+
+            add_para(doc, "", size=4)
+
+            # Tabla de Contingencia (H M F C)
+            add_heading_3(doc, "Tabla de contingencia (H, M, F, C)")
+            t_cont = create_styled_table(doc, rows=2 + num_ciudades, cols=13)
+            t_cont.style = 'Table Grid'
+
+            w_c_n = Inches(0.68)
+
+            format_cell(t_cont.cell(0, 0), "Ciudad", font_size=8, bold=True, color="FFFFFF", bg_color="1F497D", width=w_ciudad)
+
+            for idx_h, hor_lbl in enumerate(["+24 h", "+48 h", "+72 h"]):
+                start_c = 1 + idx_h * 4
+                merged_c = t_cont.cell(0, start_c)
+                merged_c.merge(t_cont.cell(0, start_c + 3))
+                format_cell(merged_c, hor_lbl, font_size=8, bold=True, color="FFFFFF", bg_color="1F497D")
+
+            set_repeat_header(t_cont.rows[0])
+            set_cant_split(t_cont.rows[0])
+
+            format_cell(t_cont.cell(1, 0), "", font_size=7.5, bg_color="BDD7EE", width=w_ciudad)
+            c_idx = 1
+            for _ in range(3):
+                for lbl in ["H", "M", "F", "C"]:
+                    format_cell(t_cont.cell(1, c_idx), lbl, font_size=7.5, bold=True, color="1F497D", bg_color="BDD7EE", width=w_c_n)
+                    c_idx += 1
+
+            set_repeat_header(t_cont.rows[1])
+            set_cant_split(t_cont.rows[1])
+
+            for r_i, (ciudad, horizontes) in enumerate(sorted(ciudades_dict.items()), start=2):
+                row = t_cont.rows[r_i]
+                format_cell(row.cells[0], ciudad, font_size=8, bold=True, color="215868", bg_color="EBF3FB", align=WD_ALIGN_PARAGRAPH.LEFT, width=w_ciudad)
+
+                c_idx = 1
+                for hor_lbl in ["+24 h", "+48 h", "+72 h"]:
+                    st_h = horizontes.get(hor_lbl)
+                    for lbl in ["H", "M", "F", "C"]:
+                        val = st_h.get(lbl) if st_h else None
+                        val_str = str(val) if val is not None else "—"
+                        bg = "C6EFCE" if lbl == "H" else ("FFC7CE" if lbl in ["M", "F"] else "FFFFFF")
+                        format_cell(row.cells[c_idx], val_str, font_size=7.5, color="222222", bg_color=bg, width=w_c_n)
+                        c_idx += 1
+                set_cant_split(row)
+
+            add_para(doc, "", size=6)
+            sub_num += 1
+
+    # ── Notas técnicas ───────────────────────────────────────────────────────
+    doc.add_page_break()
+    add_heading_1(doc, "Notas técnicas")
+    notas = [
+        "• Los valores N/D indican que no se alcanzó el mínimo de días con datos necesarios para el cálculo (≥5 pares obs/mod válidos).",
+        "• El horizonte +72 h cubre solo 18 h de la ventana local (índices 54–71 del wrfout) por la alineación UTC−6 con el inicio del run.",
+        "• BIAS = 1 indica que el modelo pronosticó el mismo número de eventos que los observados (sin importar la coincidencia día a día). BIAS > 1 indica sobreestimación de la frecuencia; BIAS < 1, subestimación.",
+        "• Las observaciones provienen de la red SINAICA/INECC; los valores del modelo corresponden al máximo diario extraído del dominio WRF-Chem sobre la región de cada ciudad (máximo espacial).",
+        "• Generado con: informe_dicotomico.py (ddsinaica v2.5.0) — ICAyCC, UNAM. Código disponible en https://github.com/JoseAgustin/ddsinaica"
+    ]
+    for nota in notas:
+        add_para(doc, nota, size=8.5, space_before=3, space_after=3)
+
+    doc.save(ruta_salida)
+    print(f"[OK] Documento generado: {ruta_salida}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1007,7 +797,7 @@ def parse_args():
         description=(
             "Genera un informe Word (.docx) con estadísticos dicotómicos "
             "mensuales (POD, FAR, CSI, TSS, PC, BIAS) para la evaluación "
-            "WRF-Chem vs SINAICA/INECC."
+            "WRF-Chem vs SINAICA/INECC usando python-docx."
         ),
     )
     p.add_argument("--entrada", "-i", default="combinado/ajustados",
@@ -1048,4 +838,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
