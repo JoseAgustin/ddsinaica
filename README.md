@@ -3,7 +3,7 @@
 [![bash](https://img.shields.io/badge/bash-%E2%89%A54.0-blue?logo=gnu-bash)](#requisitos-del-sistema)
 [![python](https://img.shields.io/badge/python-%E2%89%A53.8-blue?logo=python)](#dependencias)
 [![license](https://img.shields.io/badge/license-MIT-green)](#licencia)
-[![version](https://img.shields.io/badge/versi%C3%B3n-2.6.0-orange)](#changelog)
+[![version](https://img.shields.io/badge/versi%C3%B3n-2.7.0-orange)](#changelog)
 
 Pipeline operativo de descarga, procesamiento y validación estadística del pronóstico de calidad del aire producido por **WRF-Chem**, comparado contra observaciones horarias de la red **SINAICA/INECC**. Cubre **ocho zonas metropolitanas** del centro de México, evalúa **cuatro contaminantes** y está diseñado para ejecutarse de forma autónoma mediante crontab, publicando resultados en una página web estática actualizada cada día. Incluye módulos de **análisis mensual con diagramas de Taylor** e **informes de estadísticos dicotómicos** en formato Word.
 
@@ -119,8 +119,8 @@ El offset de 6 índices corresponde a UTC−6 (hora local del centro de México)
 | curl           | 7.x            | Peticiones HTTP a SINAICA |
 | python3        | 3.8            | Scripts de análisis y generación de documentos |
 | awk, sort, sed | POSIX          | Procesamiento de CSV en bash |
-| npm            | 12.0.1         | Ambiente Node.js |
-| docx           | 9.7.1          | Generación de documento docx |
+
+> `informe_dicotomico.py` genera documentos Word (`.docx`) usando **únicamente** el paquete Python `python-docx`. No se requiere Node.js, npm ni ningún otro runtime externo.
 
 > **macOS**: el bash instalado por defecto es la v3. Instalar `bash ≥ 4` con Homebrew (`brew install bash`) y apuntar el crontab a `/usr/local/bin/bash`.
 
@@ -304,7 +304,7 @@ Fecha,Ciudad,max_obs,mod_dia1,mod_dia2,mod_dia3
 | Archivo                         | Contenido |
 |---------------------------------|-----------|
 | `taylor_YYYY_MM.png`            | Diagrama de Taylor normalizado por σ_obs |
-| `estadisticas_taylor.csv`       | n, σ_obs, σ_mod, R, BIAS, RMSE, MAE, CRMSE, CRMSE_n, p-valor |
+| `estadisticas_taylor.csv`       | n, n_orig, n_nan, n_lim, n_iqr, σ_obs, σ_mod, R, BIAS, RMSE, MAE, CRMSE, CRMSE_n, p-valor |
 
 Cuando se usa `--ciudades`, los archivos llevan un sufijo (p. ej. `taylor_2026_06_Pachuca-Tula.png`).
 
@@ -314,6 +314,31 @@ Cuando se usa `--ciudades`, los archivos llevan un sufijo (p. ej. `taylor_2026_0
 - **Ángulo θ**: arccos(R), R = correlación de Pearson
 - **CRMSE_n**: √(r² + 1 − 2·r·R), distancia al punto de referencia
 - **Punto REF**: (1, 0) — modelo perfecto
+
+### Control de calidad de datos observados
+
+Los datos de SINAICA se usan en modo crudo (sin validar), lo que introduce valores negativos y observaciones extraordinariamente altas que distorsionan los estadísticos. El script aplica dos filtros **antes** de calcular cualquier métrica:
+
+**1. Límites físicos por contaminante** — elimina el par (obs, mod) si cualquiera de los dos valores es negativo o excede el techo operativo razonable:
+
+| Contaminante | obs min | obs max (default) | mod min | mod max |
+|--------------|---------|-------------------|---------|---------|
+| O₃           | 0       | 300 ppbv          | 0       | 300 ppbv |
+| PM10         | 0       | 1 000 µg/m³       | 0       | 1 000 µg/m³ |
+| PM2.5        | 0       | **500 µg/m³** (configurable con `--umbral-pm25`) | 0 | 500 µg/m³ |
+| SO₂          | 0       | 1 000 ppbv        | 0       | 1 000 ppbv |
+
+**2. Filtro IQR sobre observaciones de PM2.5** — elimina outliers estadísticos en la serie observada mediante el rango intercuartílico (se aplica *solo* a `max_obs` de PM2.5, nunca al modelo):
+
+```
+Límite inferior = Q1 − k · IQR
+Límite superior = Q3 + k · IQR
+```
+
+- **k = 3.0** (default, conservador): solo elimina valores extraordinarios > ~120 µg/m³ típicamente.
+- **k = 1.5**: criterio boxplot estándar, más agresivo.
+
+Cada par descartado se reporta en el log con etiqueta `[QC]` indicando el motivo y la cuenta por tipo. Al final del mes se imprime un resumen acumulado.
 
 ### Uso
 
@@ -327,19 +352,39 @@ python3 taylor_mensual.py --mes 2026-06
 # Filtrar ciudades (por espacio o coma)
 python3 taylor_mensual.py --ciudades Pachuca Tula CDMX
 python3 taylor_mensual.py --ciudades "Pachuca,Tula,CDMX"
+
+# Ajustar techo absoluto de PM2.5 (elimina obs > 120 µg/m³)
+python3 taylor_mensual.py --umbral-pm25 120
+
+# Ajustar factor IQR (más agresivo que el default 3.0)
+python3 taylor_mensual.py --umbral-pm25 120 --iqr-factor 2.5
 ```
 
 ### Parámetros
 
-| Parámetro         | Descripción                                            | Default               |
-|-------------------|--------------------------------------------------------|-----------------------|
-| `--entrada, -i`   | Directorio con CSV `eval_*.csv`                        | `combinado/ajustados` |
-| `--salida, -o`    | Directorio de salida (PNG y CSV)                       | `.`                   |
-| `--mes, -m`       | Procesar solo este mes (`YYYY-MM`)                     | todos                 |
-| `--ciudades, -c`  | Una o varias ciudades del catálogo                     | todas                 |
-| `--min-pares, -p` | Mínimo de pares obs/mod válidos por serie              | `5`                   |
-| `--max-radio, -r` | Radio máximo del diagrama (unidades normalizadas)      | `1.65`                |
-| `--dpi`           | Resolución de los PNG                                  | `150`                 |
+| Parámetro           | Descripción                                                | Default               |
+|---------------------|------------------------------------------------------------|-----------------------|
+| `--entrada, -i`     | Directorio con CSV `eval_*.csv`                            | `combinado/ajustados` |
+| `--salida, -o`      | Directorio de salida (PNG y CSV)                           | `.`                   |
+| `--mes, -m`         | Procesar solo este mes (`YYYY-MM`)                         | todos                 |
+| `--ciudades, -c`    | Una o varias ciudades del catálogo                         | todas                 |
+| `--min-pares, -p`   | Mínimo de pares obs/mod válidos por serie                  | `5`                   |
+| `--max-radio, -r`   | Radio máximo del diagrama (unidades normalizadas)          | `1.65`                |
+| `--dpi`             | Resolución de los PNG                                      | `150`                 |
+| `--umbral-pm25`     | Techo absoluto para obs de PM2.5 en µg/m³                 | `500`                 |
+| `--iqr-factor`      | Factor k del filtro IQR sobre obs PM2.5 (k=3 conservador) | `3.0`                 |
+
+### Columnas adicionales en el CSV de estadísticos (v2.7.0)
+
+El archivo `estadisticas_taylor.csv` incluye ahora columnas de trazabilidad del control de calidad:
+
+| Columna    | Descripción |
+|------------|-------------|
+| `n_orig`   | Pares totales antes de cualquier filtro |
+| `n_nan`    | Eliminados por NaN / Inf |
+| `n_lim`    | Eliminados por límites físicos (negativos o sobre techo) |
+| `n_iqr`    | Eliminados por filtro IQR (solo PM2.5) |
+| `n`        | Pares válidos usados en el cálculo |
 
 ---
 
@@ -602,6 +647,10 @@ graph TD
 | Serie con < `--min-pares` pares válidos | `taylor_mensual.py`: omite Ciudad×Cont×Horizonte |
 | Ciudad inválida en `--ciudades` | `taylor_mensual.py` / `informe_dicotomico.py`: aborta con catálogo válido |
 | Serie con < 5 días válidos | `informe_dicotomico.py`: muestra "N/D" en la celda |
+| Obs. o mod. negativos en cualquier contaminante | `taylor_mensual.py`: par descartado silenciosamente; reportado en log `[QC]` |
+| Obs. PM2.5 > `--umbral-pm25` (default 500 µg/m³) | `taylor_mensual.py`: par descartado; reportado como `n_lim` en log y CSV |
+| Obs. PM2.5 fuera de Q1 ± k·IQR | `taylor_mensual.py`: par descartado; reportado como `n_iqr` en log y CSV |
+| IQR = 0 en serie PM2.5 (serie constante) | Filtro IQR omitido; se conservan todos los valores no negativos |
 
 ---
 
@@ -611,6 +660,7 @@ Consultar el historial detallado en [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 | Versión    | Resumen |
 |------------|---------|
+| **v2.7.0** | Control de calidad de datos crudos en `taylor_mensual.py`: eliminación de valores negativos en todos los contaminantes mediante límites físicos por contaminante (`LIMITES_VALIDOS`); filtro IQR configurable sobre observaciones de PM2.5 (`--umbral-pm25`, `--iqr-factor`). CSV de estadísticos ampliado con columnas `n_orig`, `n_nan`, `n_lim`, `n_iqr`. Corrección de type hints a `Optional`/`List` de `typing` para compatibilidad con Python 3.8/3.9. Eliminación de dependencias de Node.js/npm en los requisitos del sistema. |
 | **v2.6.0** | Nuevo script `informe_dicotomico.py`: genera un documento Word (`.docx`) con estadísticos dicotómicos mensuales (POD, FAR, CSI, TSS, PC, BIAS de frecuencia) y tablas de contingencia (H, M, F, C) por Ciudad × Contaminante × Horizonte; semáforo de colores por celda; orientación A4 landscape; sin dependencia de Node.js. Nueva dependencia: `python-docx`. Nuevo directorio `informes_dicotomicos/`. |
 | **v2.5.0** | Nuevo script `taylor_mensual.py`: diagramas de Taylor mensuales normalizados (`taylor_YYYY_MM.png`) + CSV de estadísticos (`estadisticas_taylor.csv`). Argumento `--ciudades` para filtrar una o varias ciudades del dominio; sufijo en nombres de salida cuando se filtra. Nueva dependencia: `scipy`. |
 | **v2.4.0** | SO₂ como cuarto contaminante (NOM-022-SSA1-2010, umbral 130 ppbv); 5 estaciones en Tula; cuarta pestaña en HTML. |
