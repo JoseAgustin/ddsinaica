@@ -20,6 +20,21 @@ Metodología (Taylor 2001 — Taylor, K.E., 2001, JGR-Atmospheres):
     • Punto de referencia: (r=1, θ=0) — representa las observaciones perfectas
     • Los valores se normalizan por σ_obs para comparar entre contaminantes.
 
+Control de calidad de datos observados (datos sin curar de SINAICA):
+    ─────────────────────────────────────────────────────────────────
+    Los datos de SINAICA se usan en modo "crudo" (sin validar). Esto introduce
+    dos clases de problemas que se corrigen antes de calcular estadísticos:
+
+    1. Valores negativos — físicamente imposibles en todos los contaminantes.
+       Se eliminan los pares (obs, mod) donde obs < 0 o mod < 0.
+       Umbrales de validez mínima configurables por contaminante (LIMITES_VALIDOS).
+
+    2. Valores extraordinarios en PM2.5 — observaciones >120 µg/m³ en datos
+       crudos son casi siempre artefactos de sensor, no episodios reales.
+       Se aplica un filtro IQR (rango intercuartílico) que elimina puntos
+       fuera de [Q1 − k·IQR, Q3 + k·IQR], con k configurable (default 3.0).
+       El umbral fijo de 500 µg/m³ actúa como techo absoluto adicional.
+
 Formato de entrada (combinado/ajustados/):
     eval_<CONT>_<Ciudad>_YYYY-MM-DD.csv
     Columnas: Fecha, Ciudad, max_obs, mod_dia1, mod_dia2, mod_dia3
@@ -42,12 +57,15 @@ Uso:
     # Solo un mes específico:
     python3 taylor_mensual.py --mes 2026-04
 
-    # Una sola ciudad:
-    python3 taylor_mensual.py --ciudades Pachuca
-
-    # Varias ciudades (separadas por coma o espacio):
-    python3 taylor_mensual.py --ciudades Pachuca,Tula,CDMX
+    # Filtrar ciudades:
     python3 taylor_mensual.py --ciudades Pachuca Tula CDMX
+    python3 taylor_mensual.py --ciudades "Pachuca,Tula,CDMX"
+
+    # Ajustar umbral absoluto de PM2.5 (default 500 µg/m³):
+    python3 taylor_mensual.py --umbral-pm25 300
+
+    # Ajustar factor IQR para detección de outliers (default 3.0):
+    python3 taylor_mensual.py --iqr-factor 2.5
 
     # Mostrar ayuda:
     python3 taylor_mensual.py --help
@@ -59,7 +77,7 @@ Dependencias:
     pip install pandas numpy matplotlib scipy
 
 Autor  : Adaptado para el pipeline ddsinaica (José Agustín García Reynoso)
-Versión: 1.1.0  (2026-06) — añade selección de una o varias ciudades
+Versión: 1.2.0  (2026-07) — control de calidad: negativos y outliers PM2.5
 """
 
 import argparse
@@ -70,6 +88,7 @@ import sys
 import warnings
 from collections import defaultdict
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")           # Sin display — necesario en HPC/crontab
@@ -85,6 +104,35 @@ from scipy import stats
 
 # Mínimo de pares obs/mod válidos requeridos por serie para incluirse en el diagrama
 MIN_PARES = 5
+
+# ── Control de calidad de datos observados (datos crudos SINAICA) ─────────────
+#
+# 1. Límites físicos mínimos y máximos por contaminante.
+#    Cualquier valor de obs O mod fuera del rango [min, max] se descarta.
+#    El par completo (obs, mod) se elimina si alguno de los dos falla.
+#
+#    O3   : no negativo; máx operativo ~300 ppbv (episodios extremos conocidos)
+#    PM10 : no negativo; máx operativo ~1000 µg/m³
+#    PM25 : no negativo; máx operativo configurable (default 500 µg/m³ como techo)
+#    SO2  : no negativo; máx operativo ~1000 ppbv (fuentes industriales)
+#
+LIMITES_VALIDOS = {
+    #          (min_obs, max_obs,  min_mod, max_mod)  — unidades nativas del pipeline
+    "O3":   (0.0,  300.0,  0.0,  300.0),
+    "PM10": (0.0, 1000.0,  0.0, 1000.0),
+    "PM25": (0.0,  500.0,  0.0,  500.0),   # techo absoluto; IQR lo refina
+    "SO2":  (0.0, 1000.0,  0.0, 1000.0),
+}
+
+# 2. Filtro IQR para outliers en observaciones de PM2.5.
+#    Se aplica SOLO a la columna max_obs de PM2.5 (el modelo no tiene este problema).
+#    Un punto se elimina si: obs < Q1 - k*IQR  o  obs > Q3 + k*IQR
+#    con k = IQR_FACTOR (configurable vía --iqr-factor).
+#    k=3.0 (default) es un criterio conservador: solo elimina outliers extremos.
+#    k=1.5 es el criterio boxplot estándar (más agresivo).
+#
+CONTAMINANTES_FILTRO_IQR = {"PM25"}   # aplicar IQR solo a estos contaminantes
+IQR_FACTOR = 3.0                       # factor multiplicador (configurable en CLI)
 
 # Catálogo oficial de ciudades del dominio WRF-Chem (ver ddsinaica/README.md)
 CIUDADES_DOMINIO = [
@@ -144,24 +192,120 @@ MAX_RADIO = 1.65
 DPI = 150
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FUNCIONES DE CÁLCULO ESTADÍSTICO
+# CONTROL DE CALIDAD DE DATOS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def calcular_estadisticas(obs: np.ndarray, mod: np.ndarray) -> dict:
+def limpiar_serie(
+    obs: np.ndarray,
+    mod: np.ndarray,
+    contaminante: str,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
     """
-    Calcula las métricas estadísticas para el diagrama de Taylor.
+    Aplica control de calidad a un par de series (observado, modelo) antes
+    de calcular estadísticos de Taylor.
+
+    Pasos (en orden):
+    -----------------
+    1. Eliminar NaN / Inf en obs o mod.
+    2. Aplicar límites físicos por contaminante (LIMITES_VALIDOS):
+       se descarta el par si obs < min_obs, obs > max_obs,
+       mod < min_mod o mod > max_mod.
+       Esto captura valores negativos e implausiblemente altos en AMBAS series.
+    3. Para contaminantes en CONTAMINANTES_FILTRO_IQR (PM2.5):
+       filtro IQR sobre la serie de observaciones.
+       Se elimina el par si obs < Q1 - k·IQR  o  obs > Q3 + k·IQR.
 
     Parámetros
     ----------
-    obs : array-like
-        Serie de observaciones (máx. diario observado).
-    mod : array-like
-        Serie del modelo (mismo horizonte de pronóstico).
+    obs           : array de observaciones del día (max diario observado)
+    mod           : array del modelo (mismo horizonte, misma longitud que obs)
+    contaminante  : clave del contaminante ("O3", "PM10", "PM25", "SO2")
+
+    Retorna
+    -------
+    obs_limpio, mod_limpio : arrays filtrados (mismo tamaño)
+    resumen : dict con conteos {
+        "n_original"   : pares antes del filtro,
+        "n_nan"        : eliminados por NaN/Inf,
+        "n_limites"    : eliminados por límites físicos,
+        "n_iqr"        : eliminados por filtro IQR (solo PM2.5),
+        "n_final"      : pares válidos tras todos los filtros,
+    }
+    """
+    obs = np.asarray(obs, dtype=float)
+    mod = np.asarray(mod, dtype=float)
+    n_original = len(obs)
+
+    # ── Paso 1: eliminar NaN / Inf ────────────────────────────────────────────
+    mask_nan = np.isfinite(obs) & np.isfinite(mod)
+    obs, mod = obs[mask_nan], mod[mask_nan]
+    n_nan = n_original - len(obs)
+
+    # ── Paso 2: límites físicos por contaminante ──────────────────────────────
+    lim = LIMITES_VALIDOS.get(contaminante)
+    if lim is not None:
+        min_obs, max_obs, min_mod, max_mod = lim
+        mask_lim = (
+            (obs >= min_obs) & (obs <= max_obs) &
+            (mod >= min_mod) & (mod <= max_mod)
+        )
+        n_antes_lim = len(obs)
+        obs, mod = obs[mask_lim], mod[mask_lim]
+        n_limites = n_antes_lim - len(obs)
+    else:
+        n_limites = 0
+
+    # ── Paso 3: filtro IQR sobre observaciones (solo contaminantes indicados) ─
+    n_iqr = 0
+    if contaminante in CONTAMINANTES_FILTRO_IQR and len(obs) >= 4:
+        q1, q3 = np.percentile(obs, [25, 75])
+        iqr = q3 - q1
+        if iqr > 0:                         # IQR=0 → serie constante, sin filtrar
+            lim_inf = q1 - IQR_FACTOR * iqr
+            lim_sup = q3 + IQR_FACTOR * iqr
+            mask_iqr = (obs >= lim_inf) & (obs <= lim_sup)
+            n_antes_iqr = len(obs)
+            obs, mod = obs[mask_iqr], mod[mask_iqr]
+            n_iqr = n_antes_iqr - len(obs)
+
+    resumen = {
+        "n_original": n_original,
+        "n_nan":      n_nan,
+        "n_limites":  n_limites,
+        "n_iqr":      n_iqr,
+        "n_final":    len(obs),
+    }
+    return obs, mod, resumen
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FUNCIONES DE CÁLCULO ESTADÍSTICO
+# ──────────────────────────────────────────────────────────────────────────────
+
+def calcular_estadisticas(
+    obs: np.ndarray,
+    mod: np.ndarray,
+    contaminante: str = "",
+) -> Optional[Dict]:
+    """
+    Aplica control de calidad y calcula las métricas estadísticas para el
+    diagrama de Taylor.
+
+    Parámetros
+    ----------
+    obs           : array de observaciones (máx. diario observado, valores crudos).
+    mod           : array del modelo (mismo horizonte de pronóstico).
+    contaminante  : clave del contaminante ("O3", "PM10", "PM25", "SO2").
+                    Se usa para seleccionar los límites físicos y el filtro IQR.
 
     Retorna
     -------
     dict con las claves:
-        n        — número de pares válidos
+        n        — pares válidos tras control de calidad
+        n_orig   — pares antes del filtro
+        n_nan    — eliminados por NaN/Inf
+        n_lim    — eliminados por límites físicos
+        n_iqr    — eliminados por filtro IQR (solo PM2.5)
         sigma_obs— desviación estándar de las observaciones
         sigma_mod— desviación estándar del modelo
         r        — sigma_mod / sigma_obs  (razón normalizada)
@@ -172,46 +316,44 @@ def calcular_estadisticas(obs: np.ndarray, mod: np.ndarray) -> dict:
         RMSE     — RMSE convencional
         BIAS     — sesgo medio (mod − obs)
         MAE      — error absoluto medio
+    o None si no hay suficientes pares válidos.
     """
-    obs = np.asarray(obs, dtype=float)
-    mod = np.asarray(mod, dtype=float)
+    # ── Control de calidad ────────────────────────────────────────────────────
+    obs, mod, qc = limpiar_serie(np.asarray(obs, float), np.asarray(mod, float),
+                                 contaminante)
 
-    # Eliminar pares con NaN en cualquiera de las dos series
-    mask = np.isfinite(obs) & np.isfinite(mod)
-    obs = obs[mask]
-    mod = mod[mask]
-    n = len(obs)
+    if qc["n_nan"] > 0 or qc["n_limites"] > 0 or qc["n_iqr"] > 0:
+        pass   # El reporte detallado se hace en procesar_mes con print [QC]
 
+    n = qc["n_final"]
     if n < MIN_PARES:
-        return None      # Insuficientes datos
+        return None      # Insuficientes datos tras el filtro
 
+    # ── Estadísticos de Taylor ────────────────────────────────────────────────
     sigma_obs = float(np.std(obs, ddof=1))
     sigma_mod = float(np.std(mod, ddof=1))
 
     if sigma_obs < 1e-10:
-        # Serie de observaciones constante — correlación indefinida
         warnings.warn("σ_obs ≈ 0; serie de observaciones constante.", RuntimeWarning)
         return None
 
     R, p_valor = stats.pearsonr(obs, mod)
-    R = float(np.clip(R, -1.0, 1.0))   # Asegurar rango [-1, 1] por redondeo numérico
+    R     = float(np.clip(R, -1.0, 1.0))
     theta = float(np.arccos(R))
+    r     = sigma_mod / sigma_obs
 
-    r = sigma_mod / sigma_obs           # Razón normalizada (eje radial del diagrama)
-
-    # CRMSE normalizado: distancia al punto de referencia en el espacio polar
     CRMSE_n = float(np.sqrt(r**2 + 1.0 - 2.0 * r * R))
-
-    # CRMSE sin normalizar (unidades originales)
-    CRMSE = float(CRMSE_n * sigma_obs)
-
-    # Métricas convencionales
-    RMSE = float(np.sqrt(np.mean((mod - obs)**2)))
-    BIAS = float(np.mean(mod - obs))
-    MAE  = float(np.mean(np.abs(mod - obs)))
+    CRMSE   = float(CRMSE_n * sigma_obs)
+    RMSE    = float(np.sqrt(np.mean((mod - obs)**2)))
+    BIAS    = float(np.mean(mod - obs))
+    MAE     = float(np.mean(np.abs(mod - obs)))
 
     return {
         "n":         n,
+        "n_orig":    qc["n_original"],
+        "n_nan":     qc["n_nan"],
+        "n_lim":     qc["n_limites"],
+        "n_iqr":     qc["n_iqr"],
         "sigma_obs": sigma_obs,
         "sigma_mod": sigma_mod,
         "r":         r,
@@ -230,7 +372,7 @@ def calcular_estadisticas(obs: np.ndarray, mod: np.ndarray) -> dict:
 # FUNCIONES DE LECTURA DE DATOS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def normalizar_ciudad(nombre: str) -> str | None:
+def normalizar_ciudad(nombre: str) -> Optional[str]:
     """
     Convierte un nombre de ciudad escrito por el usuario a su forma canónica
     del catálogo del dominio WRF-Chem. Retorna None si no se reconoce.
@@ -238,7 +380,7 @@ def normalizar_ciudad(nombre: str) -> str | None:
     return _CIUDADES_NORM.get(nombre.strip().lower())
 
 
-def parsear_lista_ciudades(valor) -> list[str] | None:
+def parsear_lista_ciudades(valor) -> Optional[List[str]]:
     """
     Parsea el argumento --ciudades en una lista de nombres canónicos.
 
@@ -281,7 +423,7 @@ def parsear_lista_ciudades(valor) -> list[str] | None:
 
 
 
-def parsear_nombre_archivo(ruta: str) -> tuple[str, str] | None:
+def parsear_nombre_archivo(ruta: str) -> Optional[Tuple[str, str]]:
     """
     Extrae contaminante y ciudad del nombre del archivo CSV.
 
@@ -325,7 +467,7 @@ def leer_csv(ruta: str) -> pd.DataFrame | None:
 
 def agrupar_datos_por_mes(
     directorio: str,
-    ciudades_filtro: list[str] | None = None,
+    ciudades_filtro: Optional[List[str]] = None,
 ) -> dict:
     """
     Lee todos los CSV válidos en ``directorio`` y los organiza en un diccionario:
@@ -527,9 +669,9 @@ def configurar_ejes_taylor(ax: plt.Axes, max_radio: float) -> None:
 
 def graficar_taylor_mensual(
     mes_str: str,
-    registros: list[dict],
+    registros: List[dict],
     dir_salida: str,
-    ciudades_filtro: list[str] | None = None,
+    ciudades_filtro: Optional[List[str]] = None,
 ) -> None:
     """
     Genera y guarda el diagrama de Taylor para un mes.
@@ -659,16 +801,18 @@ def graficar_taylor_mensual(
 
 def exportar_estadisticas(
     mes_str: str,
-    registros: list[dict],
+    registros: List[dict],
     dir_salida: str,
-    ciudades_filtro: list[str] | None = None,
+    ciudades_filtro: Optional[List[str]] = None,
 ) -> None:
     """
     Escribe el CSV de estadísticas mensuales de Taylor.
 
     Columnas de salida:
-        mes, ciudad, contaminante, horizonte, n,
-        sigma_obs, sigma_mod, r_norm, R, BIAS, RMSE, MAE, CRMSE, CRMSE_n, p_valor
+        mes, ciudad, contaminante, horizonte,
+        n, n_orig, n_nan, n_lim, n_iqr,       ← control de calidad
+        sigma_obs, sigma_mod, r_norm, R,
+        BIAS, RMSE, MAE, CRMSE, CRMSE_n, p_valor
 
     ciudades_filtro : si se proporcionó, se añade un sufijo al nombre del
                        CSV para no mezclar resultados de distintas corridas
@@ -685,7 +829,13 @@ def exportar_estadisticas(
             "ciudad":       reg["ciudad"],
             "contaminante": reg["contaminante"],
             "horizonte":    reg["horizonte"],
+            # ── Control de calidad ──────────────────────────────────────────
             "n":            st["n"],
+            "n_orig":       st["n_orig"],
+            "n_nan":        st["n_nan"],
+            "n_lim":        st["n_lim"],
+            "n_iqr":        st["n_iqr"],
+            # ── Estadísticos Taylor ─────────────────────────────────────────
             "sigma_obs":    round(st["sigma_obs"], 4),
             "sigma_mod":    round(st["sigma_mod"], 4),
             "r_norm":       round(st["r"],         4),
@@ -711,7 +861,7 @@ def exportar_estadisticas(
     ruta_csv   = os.path.join(dir_salida, nombre_csv)
 
     # Modo append si el archivo ya existe (para acumular varios meses)
-    modo    = "a" if os.path.exists(ruta_csv) else "w"
+    modo     = "a" if os.path.exists(ruta_csv) else "w"
     cabecera = not os.path.exists(ruta_csv)
     df_out.to_csv(ruta_csv, mode=modo, header=cabecera, index=False)
     print(f"[OK]   Estadísticas escritas: {ruta_csv}  ({len(df_out)} filas)")
@@ -725,7 +875,7 @@ def procesar_mes(
     mes_str: str,
     datos_mes: dict,
     dir_salida: str,
-    ciudades_filtro: list[str] | None = None,
+    ciudades_filtro: Optional[List[str]] = None,
 ) -> None:
     """
     Consolida los datos de un mes, calcula estadísticas y genera salidas.
@@ -737,6 +887,8 @@ def procesar_mes(
     registros_ok = []
     n_series     = 0
     n_omitidos   = 0
+    # Acumuladores de control de calidad para el resumen final del mes
+    qc_total = {"n_nan": 0, "n_lim": 0, "n_iqr": 0}
 
     for ciudad, conts in sorted(datos_mes.items()):
         for cont, lista_df in sorted(conts.items()):
@@ -751,7 +903,8 @@ def procesar_mes(
                 n_series += 1
                 mod = df_mes[col_mod].values
 
-                st = calcular_estadisticas(obs, mod)
+                # Pasar el contaminante para aplicar QC específico
+                st = calcular_estadisticas(obs, mod, contaminante=cont)
 
                 etiq = f"{ciudad} {cont} {hor_label}"
                 if st is None:
@@ -762,6 +915,24 @@ def procesar_mes(
                     n_omitidos += 1
                     continue
 
+                # Reportar descarte de datos si hubo filtrado QC
+                if st["n_nan"] + st["n_lim"] + st["n_iqr"] > 0:
+                    desc = []
+                    if st["n_nan"] > 0:
+                        desc.append(f"NaN/Inf={st['n_nan']}")
+                    if st["n_lim"] > 0:
+                        desc.append(f"límites físicos={st['n_lim']}")
+                    if st["n_iqr"] > 0:
+                        desc.append(f"outliers IQR={st['n_iqr']}")
+                    print(
+                        f"[QC]   {mes_str} | {etiq}: "
+                        f"{st['n_orig'] - st['n']} pares descartados "
+                        f"({', '.join(desc)}) → quedan {st['n']}/{st['n_orig']}"
+                    )
+                    qc_total["n_nan"] += st["n_nan"]
+                    qc_total["n_lim"] += st["n_lim"]
+                    qc_total["n_iqr"] += st["n_iqr"]
+
                 registros_ok.append({
                     "ciudad":       ciudad,
                     "contaminante": cont,
@@ -770,10 +941,18 @@ def procesar_mes(
                     "etiqueta":     etiq,
                 })
 
+    total_descartados = sum(qc_total.values())
     print(
         f"[INFO] {mes_str}: {n_series} series evaluadas, "
         f"{len(registros_ok)} válidas, {n_omitidos} omitidas."
     )
+    if total_descartados > 0:
+        print(
+            f"[QC]   {mes_str}: total pares descartados en el mes — "
+            f"NaN/Inf={qc_total['n_nan']}, "
+            f"límites físicos={qc_total['n_lim']}, "
+            f"outliers IQR={qc_total['n_iqr']}"
+        )
 
     graficar_taylor_mensual(mes_str, registros_ok, dir_salida, ciudades_filtro)
     exportar_estadisticas(mes_str, registros_ok, dir_salida, ciudades_filtro)
@@ -847,6 +1026,28 @@ def parse_args() -> argparse.Namespace:
         metavar="DPI",
         help=f"Resolución de los PNG (default: {DPI})",
     )
+    parser.add_argument(
+        "--umbral-pm25",
+        type=float,
+        default=LIMITES_VALIDOS["PM25"][1],
+        metavar="UG_M3",
+        help=(
+            "Techo absoluto para observaciones de PM2.5 en µg/m³. "
+            "Pares con max_obs > este valor se descartan antes del cálculo. "
+            f"Default: {LIMITES_VALIDOS['PM25'][1]} µg/m³."
+        ),
+    )
+    parser.add_argument(
+        "--iqr-factor",
+        type=float,
+        default=IQR_FACTOR,
+        metavar="K",
+        help=(
+            "Factor multiplicador del IQR para detección de outliers en PM2.5. "
+            "Se eliminan observaciones fuera de [Q1 - k·IQR, Q3 + k·IQR]. "
+            "k=3.0 (default, conservador) | k=1.5 (criterio boxplot estándar, agresivo)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -854,19 +1055,27 @@ def main() -> None:
     args = parse_args()
 
     # Aplicar argumentos a variables globales
-    global MIN_PARES, MAX_RADIO, DPI
-    MIN_PARES = args.min_pares
-    MAX_RADIO = args.max_radio
-    DPI       = args.dpi
+    global MIN_PARES, MAX_RADIO, DPI, IQR_FACTOR, LIMITES_VALIDOS
+    MIN_PARES  = args.min_pares
+    MAX_RADIO  = args.max_radio
+    DPI        = args.dpi
+    IQR_FACTOR = args.iqr_factor
+
+    # Actualizar el techo absoluto de PM2.5 según el argumento CLI
+    lim_pm25 = list(LIMITES_VALIDOS["PM25"])
+    lim_pm25[1] = args.umbral_pm25   # max_obs
+    LIMITES_VALIDOS["PM25"] = tuple(lim_pm25)
 
     print("=" * 60)
     print("  Diagramas de Taylor — Evaluación WRF-Chem / SINAICA")
     print("=" * 60)
-    print(f"  Entrada : {args.entrada}")
-    print(f"  Salida  : {args.salida}")
-    print(f"  Mes     : {args.mes or 'todos'}")
-    print(f"  Ciudades: {args.ciudades or 'todas'}")
-    print(f"  Min par : {MIN_PARES}")
+    print(f"  Entrada      : {args.entrada}")
+    print(f"  Salida       : {args.salida}")
+    print(f"  Mes          : {args.mes or 'todos'}")
+    print(f"  Ciudades     : {args.ciudades or 'todas'}")
+    print(f"  Min par      : {MIN_PARES}")
+    print(f"  QC — techo PM2.5 : {LIMITES_VALIDOS['PM25'][1]} µg/m³")
+    print(f"  QC — factor IQR  : {IQR_FACTOR}  (k·IQR sobre obs PM2.5)")
     print("=" * 60)
 
     # 0. Validar y normalizar el filtro de ciudades (si se proporcionó)
@@ -906,4 +1115,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
